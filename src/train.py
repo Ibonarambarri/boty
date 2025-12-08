@@ -39,16 +39,16 @@ class TrainingConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.005  # Reduced for exploitation over exploration
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
     # Network architecture
     policy: str = "MlpLstmPolicy"
-    net_arch: list = None  # Will use default [64, 64]
+    net_arch: list = None  # Will use default [256, 256]
     # LSTM-specific
     n_lstm_layers: int = 1
-    lstm_hidden_size: int = 64
+    lstm_hidden_size: int = 256  # Increased from 64 for more capacity
     enable_critic_lstm: bool = True
 
 
@@ -59,7 +59,7 @@ class TrainingConfig:
 
     # Environment settings
     initial_balance: float = 10_000.0
-    position_size_pct: float = 0.10
+    position_size_pct: float = 0.95
     take_profit_pct: float = 0.02
     stop_loss_pct: float = 0.01
     slippage_pct: float = 0.0005
@@ -76,9 +76,9 @@ class TrainingConfig:
 
     def __post_init__(self):
         if self.net_arch is None:
-            self.net_arch = [64, 64]
+            self.net_arch = [256, 256]  # Increased from [64, 64] for more capacity
         if self.timeframes is None:
-            self.timeframes = ['1d', '1wk', '1mo']
+            self.timeframes = ['1d', '1wk']  # Removed '1mo' to reduce noise
         if self.features_per_timeframe is None:
             self.features_per_timeframe = 15
         if self.base_timeframe is None:
@@ -143,7 +143,7 @@ def create_vec_env(
         vec_env = VecNormalize(
             vec_env,
             norm_obs=True,
-            norm_reward=True,
+            norm_reward=False,  # Disabled: log returns are already small-scale
             clip_obs=10.0,
             clip_reward=10.0,
         )
@@ -404,8 +404,8 @@ if __name__ == "__main__":
 
     df = pd.DataFrame()
 
-    # Create columns for each timeframe
-    for tf in ['1d', '1wk', '1mo']:
+    # Create columns for each timeframe (removed 1mo to reduce noise)
+    for tf in ['1d', '1wk']:
         df[f'open_{tf}'] = price + np.random.randn(n) * 0.1
         df[f'high_{tf}'] = price + abs(np.random.randn(n) * 0.5)
         df[f'low_{tf}'] = price - abs(np.random.randn(n) * 0.5)
@@ -421,7 +421,6 @@ if __name__ == "__main__":
     feature_map = {
         '1d': ['log_return_1d', 'rsi_norm_1d', 'macd_norm_1d'],
         '1wk': ['log_return_1wk', 'rsi_norm_1wk', 'macd_norm_1wk'],
-        '1mo': ['log_return_1mo', 'rsi_norm_1mo', 'macd_norm_1mo'],
     }
 
     # Quick training config for testing
@@ -432,7 +431,7 @@ if __name__ == "__main__":
         n_steps=512,
         batch_size=32,
         window_size=50,
-        timeframes=['1d', '1wk', '1mo'],
+        timeframes=['1d', '1wk'],
         features_per_timeframe=3,  # Only 3 for test
         base_timeframe='1d',
     )

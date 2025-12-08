@@ -63,7 +63,7 @@ class EnvConfig:
 
     # Trading frequency control
     min_hold_steps: int = 5  # Minimum steps to hold a position before closing
-    trade_penalty: float = 0.001  # Small penalty for opening trades (discourages overtrading)
+    trade_penalty: float = 0.0005  # Reduced penalty to encourage more trading
 
     # Multi-timeframe configuration
     timeframes: list[str] = field(default_factory=lambda: ['1d', '1wk', '1mo'])
@@ -446,6 +446,9 @@ class CryptoTradingEnv(gym.Env):
         """
         Execute one step in the environment.
 
+        Uses incremental rewards based on log returns of net worth change
+        to provide dense feedback signal for learning.
+
         Args:
             action: Action to take (0=Hold, 1=Long, 2=Short)
 
@@ -455,6 +458,9 @@ class CryptoTradingEnv(gym.Env):
         reward = 0.0
         action = Action(action)
 
+        # Calculate net worth BEFORE action for incremental reward
+        prev_net_worth = self._calculate_net_worth()
+
         # First, check if existing position hits TP/SL
         if self.position != Position.NONE:
             # Check minimum hold time before allowing TP/SL
@@ -462,9 +468,7 @@ class CryptoTradingEnv(gym.Env):
             if steps_held >= self.config.min_hold_steps:
                 closed, exit_price, reason = self._check_tp_sl()
                 if closed:
-                    pnl = self._close_position(exit_price, reason)
-                    # Reward = scaled PnL
-                    reward = pnl / self.config.reward_scaling
+                    self._close_position(exit_price, reason)
 
         # Process action only if no position
         if self.position == Position.NONE:
@@ -480,7 +484,6 @@ class CryptoTradingEnv(gym.Env):
 
         # Advance step
         self.current_step += 1
-        self.total_reward += reward
 
         # Check termination
         terminated = False
@@ -492,13 +495,21 @@ class CryptoTradingEnv(gym.Env):
             truncated = True
             # Close any open position at market
             if self.position != Position.NONE:
-                pnl = self._close_position(self._get_current_price(), "EOD")
-                reward += pnl / self.config.reward_scaling
+                self._close_position(self._get_current_price(), "EOD")
 
         # 2. Bankrupt
         if self.balance <= 0:
             terminated = True
             reward = -10.0  # Large negative reward for bankruptcy
+        else:
+            # Calculate net worth AFTER action for incremental reward (log return)
+            current_net_worth = self._calculate_net_worth()
+            # Incremental reward = log return of net worth change
+            # This provides dense feedback at every step
+            if prev_net_worth > 0 and current_net_worth > 0:
+                reward += np.log(current_net_worth / prev_net_worth)
+
+        self.total_reward += reward
 
         observation = self._get_observation()
         info = self._get_info()
@@ -510,7 +521,11 @@ class CryptoTradingEnv(gym.Env):
         Get info dictionary for dashboard integration.
 
         Returns:
-            Dictionary with trading metrics
+            Dictionary with trading metrics including:
+            - net_worth: Total portfolio value (balance + unrealized PnL)
+            - pnl_pct: Cumulative P&L percentage from initial balance
+            - realized_pnl: Sum of P&L from closed trades
+            - total_reward: Cumulative reward (incremental log returns + penalties)
         """
         net_worth = self._calculate_net_worth()
         pnl_pct = (net_worth / self.config.initial_balance - 1) * 100
@@ -519,11 +534,15 @@ class CryptoTradingEnv(gym.Env):
         if self.episode_trades > 0:
             win_rate = self.winning_trades / self.episode_trades * 100
 
+        # Calculate realized PnL from closed trades
+        realized_pnl = sum(t.pnl for t in self.trade_history if t.pnl is not None)
+
         return {
             "step": self.current_step,
             "balance": self.balance,
             "net_worth": net_worth,
             "pnl_pct": pnl_pct,
+            "realized_pnl": realized_pnl,
             "position": self.position.name,
             "total_trades": self.episode_trades,
             "winning_trades": self.winning_trades,
