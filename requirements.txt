@@ -1,0 +1,34 @@
+# Crypto Trading DRL System - Dependencies
+# Python 3.10+
+
+# Core ML/RL
+gymnasium>=0.29.0
+stable-baselines3>=2.2.0
+sb3-contrib>=2.2.0
+torch>=2.0.0
+optuna>=3.0.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+pandas-ta>=0.3.14b
+
+# Data Source (Yahoo Finance)
+# Multi-timeframe: 1d (daily), 1wk (weekly), 1mo (monthly)
+# All timeframes have 10+ years of historical data available
+yfinance>=0.2.30
+
+# Storage
+pyarrow>=14.0.0  # For parquet file support
+
+# Terminal UI
+rich>=13.7.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+python-dateutil>=2.8.2
+requests>=2.31.0
+ccxt>=4.0.0

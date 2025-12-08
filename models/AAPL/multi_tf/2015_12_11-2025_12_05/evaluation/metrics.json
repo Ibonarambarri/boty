@@ -1,0 +1,10 @@
+{
+  "total_return": 5.027546100533353,
+  "buy_hold_return": 55.73704791406166,
+  "sharpe_ratio": 5.572105354494989,
+  "sortino_ratio": 6.661068708726864,
+  "max_drawdown": -2.6117597375604684,
+  "win_rate": 64.17910447761194,
+  "total_trades": 67,
+  "outperformance": -50.709501813528306
+}

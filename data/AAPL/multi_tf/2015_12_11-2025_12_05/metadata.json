@@ -1,0 +1,13 @@
+{
+  "ticker": "AAPL",
+  "start_date": "2015_12_11",
+  "end_date": "2025_12_05",
+  "timeframes": [
+    "1d",
+    "1wk",
+    "1mo"
+  ],
+  "base_timeframe": "1d",
+  "rows": 2511,
+  "created_at": "2025-12-08T18:54:01.501269"
+}
