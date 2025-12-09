@@ -19,7 +19,8 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
-# Default features to use (15 features per timeframe)
+# Default features to use (17 features per timeframe)
+# ALL FEATURES ARE STATIONARY OR NORMALIZED - NO ABSOLUTE PRICES
 DEFAULT_FEATURES = [
     # Log returns (stationary) - 3
     'log_return',
@@ -30,7 +31,7 @@ DEFAULT_FEATURES = [
     'macd_norm',
     'macd_hist_norm',
     'bb_position',
-    'atr_norm',
+    'atr_pct',  # Changed from atr_norm: ATR as percentage of price
     # Volume - 2
     'volume_norm',
     'volume_ratio',
@@ -41,6 +42,9 @@ DEFAULT_FEATURES = [
     # Candle - 2
     'candle_body_ratio',
     'candle_direction',
+    # Market Regime (NEW) - 2
+    'dist_to_sma200',  # Distance to SMA 200 (trend context)
+    'volatility_regime',  # Volatility regime indicator
 ]
 
 
@@ -143,8 +147,10 @@ def add_technical_indicators(
     # ATR - Average True Range (Volatility)
     # =========================================================================
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=atr_period)
-    # Normalize ATR as percentage of price
-    df['atr_norm'] = df['atr'] / df['close']
+    # ATR as percentage of price (better for normalization)
+    df['atr_pct'] = df['atr'] / df['close']
+    # Keep atr_norm for backward compatibility
+    df['atr_norm'] = df['atr_pct']
 
     # =========================================================================
     # VOLUME FEATURES
@@ -178,6 +184,31 @@ def add_technical_indicators(
 
     # Direction (bullish/bearish)
     df['candle_direction'] = np.sign(df['close'] - df['open'])
+
+    # =========================================================================
+    # MARKET REGIME INDICATORS (NEW - Critical for context)
+    # =========================================================================
+
+    # SMA 200 - Long-term trend indicator
+    df['sma_200'] = df['close'].rolling(window=200).mean()
+
+    # Distance to SMA 200 - Normalized relative position
+    # Positive = above SMA (bullish), Negative = below SMA (bearish)
+    # Formula: (close / sma_200) - 1
+    df['dist_to_sma200'] = (df['close'] / df['sma_200'] - 1).clip(-0.5, 0.5)
+
+    # Volatility Regime - Compare current ATR to historical ATR
+    # High volatility = 1, Low volatility = -1, Normal = 0
+    atr_sma_50 = df['atr'].rolling(window=50).mean()
+    df['volatility_regime'] = ((df['atr'] / atr_sma_50) - 1).clip(-1, 1)
+
+    # SMA 50 for shorter-term trend context
+    df['sma_50'] = df['close'].rolling(window=50).mean()
+    df['dist_to_sma50'] = (df['close'] / df['sma_50'] - 1).clip(-0.3, 0.3)
+
+    # Trend strength: SMA 50 vs SMA 200 crossover
+    # Positive = bullish (golden cross), Negative = bearish (death cross)
+    df['trend_strength'] = (df['sma_50'] / df['sma_200'] - 1).clip(-0.2, 0.2)
 
     return df
 
@@ -235,21 +266,34 @@ def add_technical_indicators_multi_tf(
         tf_df = add_technical_indicators(tf_df)
 
         # Copy indicators back with timeframe suffix
+        # ALL features are stationary/normalized - no absolute prices
         indicator_cols = [
+            # Log returns (stationary)
             'log_return', 'log_return_high', 'log_return_low',
+            # Normalized oscillators
             'rsi_norm', 'macd_norm', 'macd_hist_norm',
-            'bb_position', 'atr_norm',
+            'bb_position',
+            # Volatility (percentage-based)
+            'atr_pct', 'atr_norm',
+            # Volume (normalized)
             'volume_norm', 'volume_ratio',
+            # Momentum (percentage returns)
             'return_5', 'return_10', 'return_20',
+            # Candle patterns
             'candle_body_ratio', 'candle_direction',
+            # Market Regime (NEW)
+            'dist_to_sma200', 'volatility_regime',
+            'dist_to_sma50', 'trend_strength',
+            # Raw ATR for dynamic risk management (optional)
+            'atr',
         ]
 
         for col in indicator_cols:
             if col in tf_df.columns:
                 df[f'{col}_{tf}'] = tf_df[col]
 
-    n_indicators = len(timeframes) * 15
-    console.print(f"[green]Added {n_indicators} technical features ({len(timeframes)} timeframes x 15 features)[/green]")
+    n_indicators = len(timeframes) * len(DEFAULT_FEATURES)
+    console.print(f"[green]Added {n_indicators} technical features ({len(timeframes)} timeframes x {len(DEFAULT_FEATURES)} features)[/green]")
 
     return df
 

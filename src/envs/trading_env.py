@@ -36,13 +36,11 @@ REBALANCE_THRESHOLD = 0.05
 
 @dataclass
 class Trade:
-    """Represents an open or closed trade."""
+    """Represents an open or closed trade (dynamic management - no TP/SL)."""
     entry_step: int
     entry_price: float
     position_type: Position
     size: float  # USD value
-    take_profit: float
-    stop_loss: float
     exit_step: Optional[int] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
@@ -51,24 +49,24 @@ class Trade:
 
 @dataclass
 class EnvConfig:
-    """Environment configuration."""
+    """Environment configuration for dynamic position management."""
     initial_balance: float = 10_000.0
-    position_size_pct: float = 1.0  # 100% of balance (fully invested)
-    take_profit_pct: float = 0.015  # 1.5% (Antes 2.0%)
-    stop_loss_pct: float = 0.0075   # 0.75% (Antes 1.0%) - Mantiene ratio 2:1
+    position_size_pct: float = 1.0  # Max position size (agent controls via action magnitude)
     commission_pct: float = 0.001  # 0.1% per trade
     slippage_pct: float = 0.0005  # 0.05% slippage
-    window_size: int = 50  # Lookback window (changed from 30)
+    window_size: int = 50  # Lookback window
     reward_scaling: float = 100.0  # Scale rewards for stability
 
     # Trading frequency control
-    min_hold_steps: int = 5  # Minimum steps to hold a position before closing
-    trade_penalty: float = 0.0005  # Reduced penalty to encourage more trading
+    trade_penalty: float = 0.0005  # Small penalty per trade to discourage overtrading
 
     # Multi-timeframe configuration
     timeframes: list[str] = field(default_factory=lambda: ['1d', '1wk', '1mo'])
     features_per_timeframe: int = 15
     base_timeframe: str = '1d'
+
+    # Risk Protection (forced liquidation)
+    liquidation_threshold: float = 0.1  # Force close if net_worth < 10% of initial
 
 
 class CryptoTradingEnv(gym.Env):
@@ -150,7 +148,8 @@ class CryptoTradingEnv(gym.Env):
         # Calculate data bounds
         self.n_steps = len(self.df)
         self.n_features = len(feature_columns)
-        self.max_step = self.n_steps - 1
+        # Reserve last step for T+1 execution (can't execute on last bar)
+        self.max_step = self.n_steps - 2
 
         # Observation: features of a single timestep
         obs_shape = (self.n_features,)
@@ -199,7 +198,8 @@ class CryptoTradingEnv(gym.Env):
 
         # Calculate data bounds
         self.n_steps = len(self.df)
-        self.max_step = self.n_steps - 1
+        # Reserve last step for T+1 execution (can't execute on last bar)
+        self.max_step = self.n_steps - 2
 
         # Total features across all timeframes
         self.n_features_total = sum(self.n_features_per_tf.values())
@@ -229,6 +229,13 @@ class CryptoTradingEnv(gym.Env):
         self._last_action = 0.0  # Track last action for info
         self.episode_trades = 0
         self.winning_trades = 0
+
+        # Pending order for T+1 execution (realistic simulation)
+        self._pending_order: Optional[dict] = None
+
+        # Reward calculation history
+        self._return_history: list[float] = []
+        self._holding_negative_steps: int = 0
 
     def _get_observation(self) -> np.ndarray:
         """
@@ -269,38 +276,64 @@ class CryptoTradingEnv(gym.Env):
         """Get current candle low."""
         return float(self._ohlc[self.current_step, 2])
 
-    def _open_position(self, position_type: Position, size_pct: float) -> None:
+    def _get_current_open(self) -> float:
+        """Get current candle open."""
+        return float(self._ohlc[self.current_step, 0])
+
+    def _get_next_open(self) -> Optional[float]:
         """
-        Open a new position with specified size.
+        Get the Open price of the NEXT candle (T+1) for realistic execution.
+
+        CRITICAL: Orders placed at step T are executed at Open of step T+1.
+        This prevents look-ahead bias in order execution.
+
+        Returns:
+            Next candle's open price, or None if at last step
+        """
+        next_step = self.current_step + 1
+        if next_step < self.n_steps:
+            return float(self._ohlc[next_step, 0])  # open
+        return None
+
+    def _open_position(
+        self,
+        position_type: Position,
+        size_pct: float,
+        execution_price: Optional[float] = None,
+    ) -> None:
+        """
+        Open a new position with specified size (DYNAMIC MANAGEMENT - no TP/SL).
+
+        The agent controls when to exit via actions. No automatic TP/SL.
 
         Args:
             position_type: LONG or SHORT
             size_pct: Fraction of balance to use (0.0 to 1.0)
+            execution_price: Price at which to execute (Open of T+1)
         """
-        current_price = self._get_current_price()
+        # Use provided execution price (T+1 Open) or fallback to current close
+        base_price = execution_price if execution_price is not None else self._get_current_price()
+
+        # Apply slippage to execution price
+        if position_type == Position.LONG:
+            entry_price = base_price * (1 + self.config.slippage_pct)
+        else:  # SHORT
+            entry_price = base_price * (1 - self.config.slippage_pct)
+
+        # Position size directly from agent's action (no Kelly calculation)
         size = self.balance * size_pct
 
-        # Apply slippage
-        if position_type == Position.LONG:
-            entry_price = current_price * (1 + self.config.slippage_pct)
-        else:  # SHORT
-            entry_price = current_price * (1 - self.config.slippage_pct)
+        # Ensure size doesn't exceed balance
+        size = min(size, self.balance)
 
-        # Calculate TP/SL levels based on the actual entry price
-        if position_type == Position.LONG:
-            take_profit = entry_price * (1 + self.config.take_profit_pct)
-            stop_loss = entry_price * (1 - self.config.stop_loss_pct)
-        else:  # SHORT
-            take_profit = entry_price * (1 - self.config.take_profit_pct)
-            stop_loss = entry_price * (1 + self.config.stop_loss_pct)
+        if size <= 0:
+            return  # Can't open position with zero or negative size
 
         self.current_trade = Trade(
             entry_step=self.current_step,
             entry_price=entry_price,
             position_type=position_type,
             size=size,
-            take_profit=take_profit,
-            stop_loss=stop_loss,
         )
         self.position = position_type
 
@@ -361,43 +394,17 @@ class CryptoTradingEnv(gym.Env):
 
         return net_pnl
 
-    def _check_tp_sl(self) -> tuple[bool, float, str]:
-        """
-        Check if TP or SL was hit during current candle.
-
-        Pessimistic assumption: If both could be hit, SL is hit first.
-
-        Returns:
-            Tuple of (was_closed, exit_price, reason)
-        """
-        if self.current_trade is None:
-            return False, 0.0, ""
-
-        trade = self.current_trade
-        high = self._get_current_high()
-        low = self._get_current_low()
-
-        tp_hit = False
-        sl_hit = False
-
-        if trade.position_type == Position.LONG:
-            tp_hit = high >= trade.take_profit
-            sl_hit = low <= trade.stop_loss
-        else:  # SHORT
-            tp_hit = low <= trade.take_profit
-            sl_hit = high >= trade.stop_loss
-
-        # Pessimistic: SL takes priority
-        if sl_hit:
-            return True, trade.stop_loss, "SL"
-        elif tp_hit:
-            return True, trade.take_profit, "TP"
-
-        return False, 0.0, ""
-
-    def _transition_position(self, target: Position, target_size_pct: float) -> None:
+    def _transition_position(
+        self,
+        target: Position,
+        target_size_pct: float,
+        execution_price: Optional[float] = None,
+    ) -> None:
         """
         Transition from current position to target position.
+
+        REALISTIC EXECUTION: Uses execution_price (Open of T+1) for all
+        position changes to eliminate look-ahead bias.
 
         Handles:
         - Opening new positions
@@ -408,27 +415,30 @@ class CryptoTradingEnv(gym.Env):
         Args:
             target: Target position type (NONE, LONG, SHORT)
             target_size_pct: Target size as fraction of balance (0.0 to 1.0)
+            execution_price: Price at which to execute (Open of T+1)
         """
+        # Use provided execution price or fallback to current close
+        base_price = execution_price if execution_price is not None else self._get_current_price()
+
         # Case 1: No current position
         if self.position == Position.NONE:
             if target != Position.NONE and target_size_pct > 0:
-                self._open_position(target, target_size_pct)
+                self._open_position(target, target_size_pct, execution_price)
             return
 
         # Case 2: Close position (target is NONE or direction change)
         if target == Position.NONE or target != self.position:
-            # Apply slippage on close
-            current_price = self._get_current_price()
+            # Apply slippage on close using execution price
             if self.current_trade.position_type == Position.LONG:
-                exit_price = current_price * (1 - self.config.slippage_pct)
+                exit_price = base_price * (1 - self.config.slippage_pct)
             else:
-                exit_price = current_price * (1 + self.config.slippage_pct)
+                exit_price = base_price * (1 + self.config.slippage_pct)
 
             self._close_position(exit_price, "signal")
 
-            # If new direction, open new position
+            # If new direction, open new position at same execution price
             if target != Position.NONE and target_size_pct > 0:
-                self._open_position(target, target_size_pct)
+                self._open_position(target, target_size_pct, execution_price)
             return
 
         # Case 3: Same direction, check if rebalance needed
@@ -441,14 +451,13 @@ class CryptoTradingEnv(gym.Env):
 
                 # Only rebalance if change is significant
                 if size_diff > REBALANCE_THRESHOLD:
-                    current_price = self._get_current_price()
                     if self.current_trade.position_type == Position.LONG:
-                        exit_price = current_price * (1 - self.config.slippage_pct)
+                        exit_price = base_price * (1 - self.config.slippage_pct)
                     else:
-                        exit_price = current_price * (1 + self.config.slippage_pct)
+                        exit_price = base_price * (1 + self.config.slippage_pct)
 
                     self._close_position(exit_price, "rebalance")
-                    self._open_position(target, target_size_pct)
+                    self._open_position(target, target_size_pct, execution_price)
 
     def _calculate_net_worth(self) -> float:
         """
@@ -509,12 +518,24 @@ class CryptoTradingEnv(gym.Env):
         action: np.ndarray | float,
     ) -> tuple[np.ndarray, SupportsFloat, bool, bool, dict[str, Any]]:
         """
-        Execute one step in the environment with continuous action.
+        Execute one step in the environment with DYNAMIC POSITION MANAGEMENT.
+
+        EXECUTION MODEL:
+        - Observation is from step T (current_step)
+        - Orders are executed at Open of step T+1
+        - Agent controls ALL entries and exits (no automatic TP/SL)
+        - Forced liquidation only if net_worth < liquidation_threshold
 
         Action space: [-1, +1]
         - Positive values = LONG position (magnitude = % of capital)
         - Negative values = SHORT position (magnitude = % of capital)
         - Near zero (|action| < 0.05) = Close position / stay neutral
+
+        REWARD FUNCTION (Multi-component):
+        - Component 1: Log return of net worth change
+        - Component 2: Volatility penalty (-0.1 * std of recent returns)
+        - Component 3: Inaction penalty (if NONE during strong trend)
+        - Component 4: Bag holding penalty (if losing position held too long)
 
         Args:
             action: Continuous action in [-1, +1]
@@ -539,6 +560,16 @@ class CryptoTradingEnv(gym.Env):
         # Calculate net worth BEFORE action for incremental reward
         prev_net_worth = self._calculate_net_worth()
 
+        # Get execution price for T+1 (Open of next candle)
+        next_open = self._get_next_open()
+
+        # Check if we can execute (need T+1 data)
+        if next_open is None:
+            # At last candle, can't execute - just observe and end
+            self.current_step += 1
+            observation = self._get_observation() if self.current_step < self.n_steps else np.zeros(self.observation_space.shape, dtype=np.float32)
+            return observation, 0.0, False, True, self._get_info()
+
         # Determine target position from action
         if abs(action_value) < NEUTRAL_THRESHOLD:
             target_position = Position.NONE
@@ -557,30 +588,23 @@ class CryptoTradingEnv(gym.Env):
             self.position != Position.NONE and target_position != self.position
         )
 
-        # Execute position transition
-        self._transition_position(target_position, target_size_pct)
+        # Execute position transition at T+1 Open price
+        self._transition_position(target_position, target_size_pct, execution_price=next_open)
 
         # Apply trade penalty if we opened/changed position
         if position_changed:
             reward -= self.config.trade_penalty * target_size_pct
 
-        # Check TP/SL if we have a position
-        if self.position != Position.NONE and self.current_trade is not None:
-            steps_held = self.current_step - self.current_trade.entry_step
-            if steps_held >= self.config.min_hold_steps:
-                closed, exit_price, reason = self._check_tp_sl()
-                if closed:
-                    self._close_position(exit_price, reason)
-
-        # Advance step
+        # Advance step (now at T+1)
         self.current_step += 1
+
+        # NO TP/SL CHECK - Agent has full control over exits
 
         # Check termination
         terminated = False
         truncated = False
 
-        # Episode ends if:
-        # 1. Ran out of data
+        # Episode ends if ran out of data
         if self.current_step >= self.max_step:
             truncated = True
             # Close any open position at market with slippage
@@ -592,15 +616,79 @@ class CryptoTradingEnv(gym.Env):
                     exit_price = current_price * (1 + self.config.slippage_pct)
                 self._close_position(exit_price, "EOD")
 
-        # 2. Bankrupt
-        if self.balance <= 0:
+        # Calculate current net worth for reward and liquidation check
+        current_net_worth = self._calculate_net_worth()
+
+        # FORCED LIQUIDATION: Protect against catastrophic losses
+        liquidation_level = self.config.initial_balance * self.config.liquidation_threshold
+        if current_net_worth < liquidation_level:
+            # Force close position and end episode
+            if self.position != Position.NONE and self.current_trade is not None:
+                current_price = self._get_current_price()
+                if self.current_trade.position_type == Position.LONG:
+                    exit_price = current_price * (1 - self.config.slippage_pct)
+                else:
+                    exit_price = current_price * (1 + self.config.slippage_pct)
+                self._close_position(exit_price, "LIQUIDATION")
+            terminated = True
+            reward = -10.0  # Large negative reward for liquidation
+
+        # Calculate multi-component reward (if not already terminated)
+        elif self.balance <= 0:
             terminated = True
             reward = -10.0  # Large negative reward for bankruptcy
         else:
-            # Calculate net worth AFTER action for incremental reward (log return)
-            current_net_worth = self._calculate_net_worth()
+            # === COMPONENT 1: Log Return (PnL) ===
             if prev_net_worth > 0 and current_net_worth > 0:
-                reward += np.log(current_net_worth / prev_net_worth)
+                log_return = np.log(current_net_worth / prev_net_worth)
+                reward += log_return
+
+                # Track return history for volatility calculation
+                self._return_history.append(log_return)
+                if len(self._return_history) > 10:
+                    self._return_history.pop(0)
+
+            # === COMPONENT 2: Volatility Penalty ===
+            if len(self._return_history) >= 5:
+                returns_std = np.std(self._return_history)
+                volatility_penalty = 0.1 * returns_std
+                reward -= volatility_penalty
+
+            # === COMPONENT 3: Inaction Penalty (missed strong trends) ===
+            # Only penalize if no position during strong trend
+            if self.position == Position.NONE:
+                # Simple momentum proxy: 5-period return magnitude
+                if self.current_step >= 5:
+                    price_now = self._get_current_price()
+                    price_5_ago = float(self._ohlc[self.current_step - 5, 3])
+                    momentum = abs(price_now / price_5_ago - 1)
+                    # If momentum > 2% and no position, small penalty
+                    if momentum > 0.02:
+                        inaction_penalty = 0.0001
+                        reward -= inaction_penalty
+
+            # === COMPONENT 4: Bag Holding Penalty ===
+            if self.current_trade is not None:
+                # Calculate unrealized PnL
+                current_price = self._get_current_price()
+                entry = self.current_trade.entry_price
+                if self.current_trade.position_type == Position.LONG:
+                    unrealized_pnl_pct = (current_price - entry) / entry
+                else:
+                    unrealized_pnl_pct = (entry - current_price) / entry
+
+                # If losing money
+                if unrealized_pnl_pct < 0:
+                    self._holding_negative_steps += 1
+                    # Progressive penalty after 10 steps of holding a loser
+                    if self._holding_negative_steps > 10:
+                        excess_steps = self._holding_negative_steps - 10
+                        bag_holding_penalty = 0.0001 * excess_steps
+                        reward -= bag_holding_penalty
+                else:
+                    self._holding_negative_steps = 0
+            else:
+                self._holding_negative_steps = 0
 
         self.total_reward += reward
 

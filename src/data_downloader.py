@@ -133,11 +133,15 @@ class YahooDownloader:
         df_1mo: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Align 3 timeframes by repeating higher timeframe values.
+        Align 3 timeframes by repeating higher timeframe values WITH LAG.
+
+        CRITICAL: To avoid data leakage, higher timeframe data is shifted by 1 period.
+        This ensures that on day D, the agent only sees weekly/monthly data that has
+        ALREADY CLOSED, not the current incomplete period.
 
         Each row of the result corresponds to a daily bar (base timeframe).
-        Weekly values are repeated ~5 times per week.
-        Monthly values are repeated ~20-22 times per month.
+        Weekly values are from the PREVIOUS completed week.
+        Monthly values are from the PREVIOUS completed month.
 
         Args:
             df_1d: Daily OHLCV data (base)
@@ -145,12 +149,21 @@ class YahooDownloader:
             df_1mo: Monthly OHLCV data
 
         Returns:
-            Aligned DataFrame with suffixed columns
+            Aligned DataFrame with suffixed columns (no data leakage)
         """
         # Rename columns with suffixes
         df_1d_renamed = df_1d.add_suffix('_1d')
         df_1wk_renamed = df_1wk.add_suffix('_1wk')
         df_1mo_renamed = df_1mo.add_suffix('_1mo')
+
+        # CRITICAL: Shift higher timeframe data by 1 period to prevent data leakage
+        # This ensures we only see data from periods that have already closed
+        df_1wk_shifted = df_1wk_renamed.shift(1)  # Shift by 1 week
+        df_1mo_shifted = df_1mo_renamed.shift(1)  # Shift by 1 month
+
+        # Drop NaN rows created by shift at the beginning
+        df_1wk_shifted = df_1wk_shifted.dropna()
+        df_1mo_shifted = df_1mo_shifted.dropna()
 
         # Start with daily data as base
         aligned = df_1d_renamed.copy()
@@ -160,14 +173,14 @@ class YahooDownloader:
         aligned['_month_start'] = aligned.index.to_period('M').start_time
 
         # Prepare weekly data - use week start as key
-        df_1wk_for_merge = df_1wk_renamed.copy()
+        df_1wk_for_merge = df_1wk_shifted.copy()
         df_1wk_for_merge['_week_start'] = df_1wk_for_merge.index.to_period('W-SUN').start_time
         # Remove duplicates keeping the first occurrence for each week
         df_1wk_for_merge = df_1wk_for_merge.drop_duplicates(subset=['_week_start'], keep='first')
         df_1wk_for_merge = df_1wk_for_merge.set_index('_week_start')
 
         # Prepare monthly data - use month start as key
-        df_1mo_for_merge = df_1mo_renamed.copy()
+        df_1mo_for_merge = df_1mo_shifted.copy()
         df_1mo_for_merge['_month_start'] = df_1mo_for_merge.index.to_period('M').start_time
         # Remove duplicates keeping the first occurrence for each month
         df_1mo_for_merge = df_1mo_for_merge.drop_duplicates(subset=['_month_start'], keep='first')
@@ -182,11 +195,11 @@ class YahooDownloader:
         # Drop temporary alignment columns
         aligned = aligned.drop(columns=['_week_start', '_month_start'], errors='ignore')
 
-        # Forward fill any gaps (for initial period)
+        # Forward fill any gaps (for periods where higher TF data not yet available)
         aligned = aligned.ffill()
 
-        # Backward fill remaining NaNs at the start
-        aligned = aligned.bfill()
+        # Drop rows at the beginning where we don't have lagged data (no bfill to avoid leakage)
+        aligned = aligned.dropna()
 
         return aligned
 
@@ -288,7 +301,14 @@ class YahooDownloader:
         train_ratio: float = 0.8,
     ) -> Path:
         """
-        Save aligned DataFrame with train/eval split.
+        Save aligned DataFrame with STRICT CHRONOLOGICAL train/eval split.
+
+        IMPORTANT: No random splitting for time series data!
+        The split is strictly chronological:
+        - Train: 80% OLDEST data (first 80% chronologically)
+        - Eval: 20% NEWEST data (last 20% chronologically)
+
+        This prevents data leakage and ensures realistic backtesting.
 
         Directory structure: data/{ticker}/multi_tf/{date_range}/
             - train.parquet (80% oldest)
@@ -296,13 +316,16 @@ class YahooDownloader:
             - metadata.json
 
         Args:
-            df: Aligned DataFrame
+            df: Aligned DataFrame (must be sorted by date)
             ticker: Ticker symbol
-            train_ratio: Ratio for training split
+            train_ratio: Ratio for training split (chronological, NOT random)
 
         Returns:
             Path to saved directory
         """
+        # Ensure data is sorted chronologically
+        df = df.sort_index()
+
         # Format date range
         start_date = df.index[0].strftime("%Y_%m_%d")
         end_date = df.index[-1].strftime("%Y_%m_%d")
@@ -311,10 +334,18 @@ class YahooDownloader:
         save_dir = self.data_dir / ticker / "multi_tf" / f"{start_date}-{end_date}"
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Split temporally (older data for training, newer for evaluation)
+        # STRICT CHRONOLOGICAL SPLIT: oldest data for training, newest for evaluation
+        # This is CRITICAL for time series to avoid look-ahead bias
         split_idx = int(len(df) * train_ratio)
-        train_df = df.iloc[:split_idx]
-        eval_df = df.iloc[split_idx:]
+        train_df = df.iloc[:split_idx].copy()  # First 80% (oldest)
+        eval_df = df.iloc[split_idx:].copy()   # Last 20% (newest)
+
+        # Validate no overlap
+        if len(train_df) > 0 and len(eval_df) > 0:
+            train_end = train_df.index[-1]
+            eval_start = eval_df.index[0]
+            if train_end >= eval_start:
+                raise ValueError(f"Data leakage detected! Train end ({train_end}) >= Eval start ({eval_start})")
 
         # Save parquet files
         train_path = save_dir / "train.parquet"
@@ -323,7 +354,12 @@ class YahooDownloader:
         train_df.to_parquet(train_path, engine='pyarrow', compression='snappy')
         eval_df.to_parquet(eval_path, engine='pyarrow', compression='snappy')
 
-        # Save metadata
+        # Save metadata with split dates for verification
+        train_start_date = train_df.index[0].strftime("%Y-%m-%d") if len(train_df) > 0 else "N/A"
+        train_end_date = train_df.index[-1].strftime("%Y-%m-%d") if len(train_df) > 0 else "N/A"
+        eval_start_date = eval_df.index[0].strftime("%Y-%m-%d") if len(eval_df) > 0 else "N/A"
+        eval_end_date = eval_df.index[-1].strftime("%Y-%m-%d") if len(eval_df) > 0 else "N/A"
+
         metadata = DownloadMetadata(
             ticker=ticker,
             start_date=start_date,
@@ -333,13 +369,28 @@ class YahooDownloader:
             rows=len(df),
             created_at=datetime.now().isoformat(),
         )
+
+        # Extended metadata with split info
+        metadata_dict = asdict(metadata)
+        metadata_dict["split_info"] = {
+            "method": "chronological_strict",
+            "train_ratio": train_ratio,
+            "train_rows": len(train_df),
+            "train_date_range": f"{train_start_date} to {train_end_date}",
+            "eval_rows": len(eval_df),
+            "eval_date_range": f"{eval_start_date} to {eval_end_date}",
+        }
+
         metadata_path = save_dir / "metadata.json"
-        metadata_path.write_text(json.dumps(asdict(metadata), indent=2))
+        metadata_path.write_text(json.dumps(metadata_dict, indent=2))
 
         console.print(f"\n[green]Saved to: {save_dir}/[/green]")
         console.print(f"  [cyan]train.parquet[/cyan]: {len(train_df):,} rows ({train_ratio*100:.0f}%)")
+        console.print(f"    Date range: {train_start_date} to {train_end_date}")
         console.print(f"  [cyan]eval.parquet[/cyan]:  {len(eval_df):,} rows ({(1-train_ratio)*100:.0f}%)")
+        console.print(f"    Date range: {eval_start_date} to {eval_end_date}")
         console.print(f"  [cyan]metadata.json[/cyan]")
+        console.print(f"  [yellow]Split method: CHRONOLOGICAL (no data leakage)[/yellow]")
 
         return save_dir
 

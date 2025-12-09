@@ -60,8 +60,6 @@ class TrainingConfig:
     # Environment settings
     initial_balance: float = 10_000.0
     position_size_pct: float = 0.95
-    take_profit_pct: float = 0.02
-    stop_loss_pct: float = 0.01
     slippage_pct: float = 0.0005
     window_size: int = 50  # Changed from 30 for multi-TF
 
@@ -69,6 +67,9 @@ class TrainingConfig:
     timeframes: Optional[list[str]] = None
     features_per_timeframe: Optional[int] = None
     base_timeframe: Optional[str] = None
+
+    # Risk Protection (agent manages positions dynamically)
+    liquidation_threshold: float = 0.1  # Force close if net_worth < 10% of initial
 
     # Paths
     model_dir: str = "models"
@@ -95,7 +96,10 @@ def create_env(
     config: TrainingConfig,
 ) -> CryptoTradingEnv:
     """
-    Create a trading environment.
+    Create a trading environment with dynamic position management.
+
+    Agent controls all entries/exits. No automatic TP/SL.
+    Only forced liquidation if net_worth drops below threshold.
 
     Args:
         df: DataFrame with OHLCV + features
@@ -108,13 +112,12 @@ def create_env(
     env_config = EnvConfig(
         initial_balance=config.initial_balance,
         position_size_pct=config.position_size_pct,
-        take_profit_pct=config.take_profit_pct,
-        stop_loss_pct=config.stop_loss_pct,
         slippage_pct=config.slippage_pct,
         window_size=config.window_size,
         timeframes=config.timeframes,
         features_per_timeframe=config.features_per_timeframe,
         base_timeframe=config.base_timeframe,
+        liquidation_threshold=config.liquidation_threshold,
     )
 
     return CryptoTradingEnv(df, feature_columns, env_config)
