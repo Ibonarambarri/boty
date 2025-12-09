@@ -18,8 +18,26 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
 from src.dashboard import TradingDashboard
 
-# Action name mapping for CSV logging
-ACTION_NAMES = {0: "HOLD", 1: "LONG", 2: "SHORT"}
+# Threshold for neutral zone (matches trading_env.py)
+NEUTRAL_THRESHOLD = 0.05
+
+
+def get_action_name(action_value: float) -> str:
+    """
+    Convert continuous action value to human-readable name.
+
+    Args:
+        action_value: Action in [-1, +1]
+
+    Returns:
+        String like "NEUTRAL", "LONG_75%", "SHORT_30%"
+    """
+    if abs(action_value) < NEUTRAL_THRESHOLD:
+        return "NEUTRAL"
+    elif action_value > 0:
+        return f"LONG_{int(action_value * 100)}%"
+    else:
+        return f"SHORT_{int(abs(action_value) * 100)}%"
 
 
 class TUIDashboardCallback(BaseCallback):
@@ -309,7 +327,7 @@ class CSVLoggerCallback(BaseCallback):
     CSV_COLUMNS = [
         "global_step", "episode", "env_step", "action", "action_name",
         "reward", "balance", "net_worth", "pnl_pct", "realized_pnl",
-        "position", "total_trades", "winning_trades", "win_rate",
+        "position", "position_size_pct", "total_trades", "winning_trades", "win_rate",
         "current_price", "done", "timestamp"
     ]
 
@@ -377,7 +395,13 @@ class CSVLoggerCallback(BaseCallback):
         info = infos[0] if infos else {}
         reward = float(rewards[0]) if isinstance(rewards, (list, np.ndarray)) else float(rewards)
         done = bool(dones[0]) if isinstance(dones, (list, np.ndarray)) else bool(dones)
-        action = int(actions[0]) if isinstance(actions, (list, np.ndarray)) else int(actions)
+
+        # Extract continuous action (now a float in [-1, 1])
+        raw_action = actions[0] if isinstance(actions, (list, np.ndarray)) else actions
+        if isinstance(raw_action, np.ndarray):
+            action = float(raw_action[0]) if raw_action.shape else float(raw_action)
+        else:
+            action = float(raw_action)
 
         # Track episode
         if done:
@@ -388,14 +412,15 @@ class CSVLoggerCallback(BaseCallback):
             "global_step": self.num_timesteps,
             "episode": self.episode_count,
             "env_step": info.get("step", 0),
-            "action": action,
-            "action_name": ACTION_NAMES.get(action, "UNKNOWN"),
+            "action": round(action, 4),  # Continuous action value
+            "action_name": get_action_name(action),
             "reward": reward,
             "balance": info.get("balance", 0.0),
             "net_worth": info.get("net_worth", 0.0),
             "pnl_pct": info.get("pnl_pct", 0.0),
             "realized_pnl": info.get("realized_pnl", 0.0),
             "position": info.get("position", "NONE"),
+            "position_size_pct": round(info.get("position_size_pct", 0.0), 4),
             "total_trades": info.get("total_trades", 0),
             "winning_trades": info.get("winning_trades", 0),
             "win_rate": info.get("win_rate", 0.0),

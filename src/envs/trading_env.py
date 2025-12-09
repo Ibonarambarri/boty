@@ -226,6 +226,7 @@ class CryptoTradingEnv(gym.Env):
         self.trade_history: list[Trade] = []
         self.current_step = self.config.window_size
         self.total_reward = 0.0
+        self._last_action = 0.0  # Track last action for info
         self.episode_trades = 0
         self.winning_trades = 0
 
@@ -505,46 +506,71 @@ class CryptoTradingEnv(gym.Env):
 
     def step(
         self,
-        action: int,
+        action: np.ndarray | float,
     ) -> tuple[np.ndarray, SupportsFloat, bool, bool, dict[str, Any]]:
         """
-        Execute one step in the environment.
+        Execute one step in the environment with continuous action.
 
-        Uses incremental rewards based on log returns of net worth change
-        to provide dense feedback signal for learning.
+        Action space: [-1, +1]
+        - Positive values = LONG position (magnitude = % of capital)
+        - Negative values = SHORT position (magnitude = % of capital)
+        - Near zero (|action| < 0.05) = Close position / stay neutral
 
         Args:
-            action: Action to take (0=Hold, 1=Long, 2=Short)
+            action: Continuous action in [-1, +1]
 
         Returns:
             Tuple of (observation, reward, terminated, truncated, info)
         """
         reward = 0.0
-        action = Action(action)
+
+        # Extract continuous action value
+        if isinstance(action, np.ndarray):
+            action_value = float(action[0]) if action.shape else float(action)
+        else:
+            action_value = float(action)
+
+        # Clip to valid range
+        action_value = np.clip(action_value, -1.0, 1.0)
+
+        # Store action for info dict
+        self._last_action = action_value
 
         # Calculate net worth BEFORE action for incremental reward
         prev_net_worth = self._calculate_net_worth()
 
-        # First, check if existing position hits TP/SL
-        if self.position != Position.NONE:
-            # Check minimum hold time before allowing TP/SL
+        # Determine target position from action
+        if abs(action_value) < NEUTRAL_THRESHOLD:
+            target_position = Position.NONE
+            target_size_pct = 0.0
+        elif action_value > 0:
+            target_position = Position.LONG
+            target_size_pct = action_value  # 0.0 to 1.0
+        else:
+            target_position = Position.SHORT
+            target_size_pct = abs(action_value)  # 0.0 to 1.0
+
+        # Check if position changed (for trade penalty)
+        position_changed = (
+            self.position == Position.NONE and target_position != Position.NONE
+        ) or (
+            self.position != Position.NONE and target_position != self.position
+        )
+
+        # Execute position transition
+        self._transition_position(target_position, target_size_pct)
+
+        # Apply trade penalty if we opened/changed position
+        if position_changed:
+            reward -= self.config.trade_penalty * target_size_pct
+
+        # Check TP/SL if we have a position
+        if self.position != Position.NONE and self.current_trade is not None:
             steps_held = self.current_step - self.current_trade.entry_step
             if steps_held >= self.config.min_hold_steps:
                 closed, exit_price, reason = self._check_tp_sl()
                 if closed:
                     self._close_position(exit_price, reason)
-
-        # Process action only if no position
-        if self.position == Position.NONE:
-            if action == Action.LONG:
-                self._open_position(Position.LONG)
-                # Apply trade penalty to discourage overtrading
-                reward -= self.config.trade_penalty
-            elif action == Action.SHORT:
-                self._open_position(Position.SHORT)
-                # Apply trade penalty to discourage overtrading
-                reward -= self.config.trade_penalty
-            # HOLD does nothing
 
         # Advance step
         self.current_step += 1
@@ -558,12 +584,11 @@ class CryptoTradingEnv(gym.Env):
         if self.current_step >= self.max_step:
             truncated = True
             # Close any open position at market with slippage
-            if self.position != Position.NONE:
+            if self.position != Position.NONE and self.current_trade is not None:
                 current_price = self._get_current_price()
-                # Apply slippage: unfavorable direction for the trader
                 if self.current_trade.position_type == Position.LONG:
                     exit_price = current_price * (1 - self.config.slippage_pct)
-                else:  # SHORT
+                else:
                     exit_price = current_price * (1 + self.config.slippage_pct)
                 self._close_position(exit_price, "EOD")
 
@@ -574,8 +599,6 @@ class CryptoTradingEnv(gym.Env):
         else:
             # Calculate net worth AFTER action for incremental reward (log return)
             current_net_worth = self._calculate_net_worth()
-            # Incremental reward = log return of net worth change
-            # This provides dense feedback at every step
             if prev_net_worth > 0 and current_net_worth > 0:
                 reward += np.log(current_net_worth / prev_net_worth)
 
@@ -607,6 +630,13 @@ class CryptoTradingEnv(gym.Env):
         # Calculate realized PnL from closed trades
         realized_pnl = sum(t.pnl for t in self.trade_history if t.pnl is not None)
 
+        # Calculate position size percentage if in a trade
+        position_size_pct = 0.0
+        if self.current_trade is not None:
+            total_equity = self.balance + self.current_trade.size
+            if total_equity > 0:
+                position_size_pct = self.current_trade.size / total_equity
+
         return {
             "step": self.current_step,
             "balance": self.balance,
@@ -614,6 +644,8 @@ class CryptoTradingEnv(gym.Env):
             "pnl_pct": pnl_pct,
             "realized_pnl": realized_pnl,
             "position": self.position.name,
+            "position_size_pct": position_size_pct,
+            "last_action": self._last_action,
             "total_trades": self.episode_trades,
             "winning_trades": self.winning_trades,
             "win_rate": win_rate,
