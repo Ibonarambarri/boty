@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from sb3_contrib import RecurrentPPO
 
-from src.feature_engineering import add_technical_indicators_multi_tf, prepare_features_for_env_multi_tf
+from src.data.feature_engineering import add_technical_indicators_multi_tf, prepare_features_for_env_multi_tf
 
 logger = logging.getLogger(__name__)
 

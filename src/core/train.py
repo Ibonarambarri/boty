@@ -20,8 +20,8 @@ from stable_baselines3 import PPO
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from src.callbacks import TUIDashboardCallback, ModelCheckpointCallback, create_callback_list
-from src.dashboard import TradingDashboard
+from src.utils.callbacks import TUIDashboardCallback, ModelCheckpointCallback, create_callback_list
+from src.utils.dashboard import TradingDashboard
 from src.envs.trading_env import CryptoTradingEnv, EnvConfig
 
 console = Console()

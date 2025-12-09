@@ -13,9 +13,9 @@ import optuna
 import pandas as pd
 from sb3_contrib import RecurrentPPO
 
-from src.train import TrainingConfig, create_vec_env
-from src.evaluation import AgentEvaluator
-from src.feature_engineering import (
+from src.core.train import TrainingConfig, create_vec_env
+from src.core.evaluation import AgentEvaluator
+from src.data.feature_engineering import (
     add_technical_indicators_multi_tf,
     prepare_features_for_env_multi_tf,
 )
@@ -52,8 +52,6 @@ def objective(
     ent_coef = trial.suggest_float("ent_coef", 1e-8, 0.1, log=True)
 
     # Environment
-    take_profit_pct = trial.suggest_float("take_profit_pct", 0.01, 0.1, log=True)
-    stop_loss_pct = trial.suggest_float("stop_loss_pct", 0.01, 0.1, log=True)
     slippage_pct = trial.suggest_float("slippage_pct", 1e-5, 1e-3, log=True)
 
     # Architecture
@@ -75,8 +73,6 @@ def objective(
         net_arch=net_arch,
         n_lstm_layers=n_lstm_layers,
         lstm_hidden_size=lstm_hidden_size,
-        take_profit_pct=take_profit_pct,
-        stop_loss_pct=stop_loss_pct,
         slippage_pct=slippage_pct,
         total_timesteps=50_000,  # Shorter training for optimization
         save_freq=1_000_000, # Don't save intermediate models

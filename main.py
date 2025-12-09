@@ -26,16 +26,16 @@ from rich.table import Table
 from rich.text import Text
 
 # Project imports
-from src.data_downloader import YahooDownloader
-from src.feature_engineering import (
+from src.data.data_downloader import YahooDownloader
+from src.data.feature_engineering import (
     add_technical_indicators,
     add_technical_indicators_multi_tf,
     prepare_features_for_env,
     prepare_features_for_env_multi_tf,
     get_feature_stats,
 )
-from src.train import train, evaluate, TrainingConfig
-from src.optimize import run_optimization
+from src.core.train import train, evaluate, TrainingConfig
+from src.core.optimize import run_optimization
 
 console = Console()
 
@@ -176,7 +176,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     import json
     from stable_baselines3 import PPO
     from sb3_contrib import RecurrentPPO
-    from src.evaluation import AgentEvaluator
+    from src.core.evaluation import AgentEvaluator
 
     model_dir = Path(args.model)
 
@@ -337,7 +337,7 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
 def cmd_live(args: argparse.Namespace) -> None:
     """Run the live trading bot."""
-    from src.live_trading import LiveTrader
+    from src.core.live_trading import LiveTrader
     
     console.print("\n[bold red]-- LIVE TRADING MODE --[/bold red]")
     console.print("[yellow]DISCLAIMER: Live trading is extremely risky. This is a demo implementation.[/yellow]")

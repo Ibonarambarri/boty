@@ -16,7 +16,7 @@ from typing import Any, Optional
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
-from src.dashboard import TradingDashboard
+from src.utils.dashboard import TradingDashboard
 
 # Threshold for neutral zone (matches trading_env.py)
 NEUTRAL_THRESHOLD = 0.05

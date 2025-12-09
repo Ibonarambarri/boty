@@ -140,8 +140,6 @@ class AgentEvaluator:
             config = EnvConfig(
                 initial_balance=self.initial_balance,
                 position_size_pct=0.95,
-                take_profit_pct=0.02,
-                stop_loss_pct=0.01,
                 window_size=50,
                 timeframes=timeframes,
                 base_timeframe=self.base_tf,
@@ -150,8 +148,6 @@ class AgentEvaluator:
             config = EnvConfig(
                 initial_balance=self.initial_balance,
                 position_size_pct=0.95,
-                take_profit_pct=0.02,
-                stop_loss_pct=0.01,
             )
 
         def make_env():
@@ -735,7 +731,7 @@ def run_full_evaluation(
     Returns:
         EvaluationResult
     """
-    from src.feature_engineering import add_technical_indicators, prepare_features_for_env
+    from src.data.feature_engineering import add_technical_indicators, prepare_features_for_env
 
     # Create output directory
     output_path = Path(output_dir)
