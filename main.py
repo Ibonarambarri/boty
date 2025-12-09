@@ -285,6 +285,8 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         "win_rate": result.win_rate,
         "total_trades": result.total_trades,
         "outperformance": result.total_return - result.buy_hold_return,
+        "avg_position_size": result.avg_position_size,
+        "position_size_std": result.position_size_std,
     }
 
     metrics_path = eval_output_dir / "metrics.json"

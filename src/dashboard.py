@@ -50,6 +50,7 @@ class TrainingMetrics:
     mean_reward: float = 0.0
     best_reward: float = float('-inf')
     current_position: str = "NONE"
+    position_size_pct: float = 0.0
     current_price: float = 0.0
 
     # History for charts
@@ -232,9 +233,15 @@ class TradingDashboard:
             "SHORT": "red",
         }.get(m.current_position, "dim")
 
+        # Format position with size percentage for continuous actions
+        if m.current_position == "NONE":
+            pos_str = "NONE"
+        else:
+            pos_str = f"{m.current_position} {int(m.position_size_pct * 100)}%"
+
         table.add_row(
             "Position",
-            f"[{pos_color}]{m.current_position}[/{pos_color}]",
+            f"[{pos_color}]{pos_str}[/{pos_color}]",
             "Price",
             f"${m.current_price:,.2f}",
         )
@@ -359,6 +366,7 @@ class TradingDashboard:
         fps: Optional[float] = None,
         mean_reward: Optional[float] = None,
         position: Optional[str] = None,
+        position_size_pct: Optional[float] = None,
         current_price: Optional[float] = None,
     ) -> None:
         """
@@ -377,6 +385,7 @@ class TradingDashboard:
             fps: Steps per second
             mean_reward: Mean reward over recent episodes
             position: Current position (NONE, LONG, SHORT)
+            position_size_pct: Position size as fraction of capital (0.0 to 1.0)
             current_price: Current asset price
         """
         m = self.metrics
@@ -422,6 +431,9 @@ class TradingDashboard:
 
         if position is not None:
             m.current_position = position
+
+        if position_size_pct is not None:
+            m.position_size_pct = position_size_pct
 
         if current_price is not None:
             m.current_price = current_price

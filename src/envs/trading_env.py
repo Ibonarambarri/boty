@@ -76,7 +76,7 @@ class CryptoTradingEnv(gym.Env):
     Cryptocurrency Trading Environment.
 
     Features:
-    - Discrete actions: Hold, Long, Short
+    - Continuous actions: [-1, +1] where magnitude = position size %, sign = direction
     - Position management with TP/SL
     - Realistic commission modeling
     - Multi-timeframe observation support

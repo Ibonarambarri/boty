@@ -174,6 +174,7 @@ class TUIDashboardCallback(BaseCallback):
             fps=fps,
             mean_reward=float(mean_reward),
             position=info.get("position", "NONE"),
+            position_size_pct=info.get("position_size_pct", 0.0),
             current_price=info.get("current_price", 0.0),
         )
 

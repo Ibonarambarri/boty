@@ -80,6 +80,10 @@ class EvaluationResult:
     best_trade: float = 0.0
     worst_trade: float = 0.0
 
+    # Position sizing metrics (continuous actions)
+    avg_position_size: float = 0.0
+    position_size_std: float = 0.0
+
     # Time series data
     prices: np.ndarray = field(default_factory=lambda: np.array([]))
     timestamps: list = field(default_factory=list)
@@ -181,6 +185,7 @@ class AgentEvaluator:
 
         equity_curve = [self.initial_balance]
         trades = []
+        position_sizes = []  # Track position sizes for continuous actions
         done = False
 
         while not done:
@@ -194,15 +199,23 @@ class AgentEvaluator:
                 episode_starts = np.zeros((env.num_envs,), dtype=bool)
             else:
                 action, _ = self.model.predict(obs, deterministic=True)
-            
+
             obs, reward, done, info = env.step(action)
 
             info = info[0]
             equity_curve.append(info['net_worth'])
-            
-            if done:
-                # The episode is done, so we don't need to do anything else
-                pass
+
+            # Track position size when in a position
+            if info.get('position', 'NONE') != 'NONE':
+                position_sizes.append(info.get('position_size_pct', 0.0))
+
+        # Add position sizing stats to final info
+        if position_sizes:
+            info['avg_position_size'] = float(np.mean(position_sizes))
+            info['position_size_std'] = float(np.std(position_sizes))
+        else:
+            info['avg_position_size'] = 0.0
+            info['position_size_std'] = 0.0
 
         return np.array(equity_curve), trades, info
 
@@ -373,6 +386,8 @@ class AgentEvaluator:
             max_drawdown_duration=agent_metrics['max_dd_duration'],
             win_rate=final_info.get('win_rate', 0),
             total_trades=final_info.get('total_trades', 0),
+            avg_position_size=final_info.get('avg_position_size', 0.0),
+            position_size_std=final_info.get('position_size_std', 0.0),
         )
 
         return result
@@ -660,6 +675,8 @@ class AgentEvaluator:
 
         agent_table.add_row("Total Trades", str(result.total_trades))
         agent_table.add_row("Win Rate", f"{result.win_rate:.1f}%")
+        agent_table.add_row("Avg Position Size", f"{result.avg_position_size*100:.1f}%")
+        agent_table.add_row("Position Size Std", f"{result.position_size_std*100:.1f}%")
         agent_table.add_row("Max DD Duration", f"{result.max_drawdown_duration} steps")
         agent_table.add_row("Final Balance", f"${result.agent_equity[-1]:,.2f}")
         agent_table.add_row("B&H Final Value", f"${result.buy_hold_equity[-1]:,.2f}")
