@@ -74,6 +74,10 @@ class TrainingConfig:
     model_dir: str = "models"
     log_dir: str = "logs"
 
+    # CSV Logging
+    enable_csv_logging: bool = True  # Enabled by default for Gemini analysis
+    csv_buffer_size: int = 1000
+
     def __post_init__(self):
         if self.net_arch is None:
             self.net_arch = [256, 256]  # Increased from [64, 64] for more capacity
@@ -248,6 +252,8 @@ def train(
         save_path=model_dir,
         save_freq=config.save_freq,
         update_freq=config.update_freq,
+        enable_csv_logging=config.enable_csv_logging,
+        csv_buffer_size=config.csv_buffer_size,
     )
 
     # Training with Live dashboard

@@ -135,7 +135,7 @@ class AgentEvaluator:
             timeframes = list(self.feature_columns.keys())
             config = EnvConfig(
                 initial_balance=self.initial_balance,
-                position_size_pct=0.10,
+                position_size_pct=0.95,
                 take_profit_pct=0.02,
                 stop_loss_pct=0.01,
                 window_size=50,
@@ -145,7 +145,7 @@ class AgentEvaluator:
         else:
             config = EnvConfig(
                 initial_balance=self.initial_balance,
-                position_size_pct=0.10,
+                position_size_pct=0.95,
                 take_profit_pct=0.02,
                 stop_loss_pct=0.01,
             )
@@ -274,9 +274,13 @@ class AgentEvaluator:
         # Total return
         total_return = (equity_curve[-1] / equity_curve[0] - 1) * 100
 
-        # Sharpe Ratio (annualized, assuming hourly data)
+        # Sharpe Ratio (annualized)
+        # TODO: Make annualization factor dynamic based on data frequency.
+        # Current hardcoded value assumes hourly data (24 * 365 = 8760 periods/year).
+        # For daily data use 252, for 4h data use 6 * 365 = 2190, etc.
+        annualization_factor = 24 * 365  # Hourly data assumption
         if len(returns) > 0 and np.std(returns) > 0:
-            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(24 * 365)
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(annualization_factor)
         else:
             sharpe = 0.0
 
@@ -284,7 +288,7 @@ class AgentEvaluator:
         downside_returns = returns[returns < 0]
         if len(downside_returns) > 0:
             downside_std = np.std(downside_returns)
-            sortino = np.mean(returns) / downside_std * np.sqrt(24 * 365) if downside_std > 0 else 0.0
+            sortino = np.mean(returns) / downside_std * np.sqrt(annualization_factor) if downside_std > 0 else 0.0
         else:
             sortino = float('inf') if np.mean(returns) > 0 else 0.0
 

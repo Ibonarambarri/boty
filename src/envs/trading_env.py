@@ -54,8 +54,8 @@ class EnvConfig:
     """Environment configuration."""
     initial_balance: float = 10_000.0
     position_size_pct: float = 1.0  # 100% of balance (fully invested)
-    take_profit_pct: float = 0.05  # +5% (increased to let trades run)
-    stop_loss_pct: float = 0.025  # -2.5% (2:1 ratio maintained)
+    take_profit_pct: float = 0.015  # 1.5% (Antes 2.0%)
+    stop_loss_pct: float = 0.0075   # 0.75% (Antes 1.0%) - Mantiene ratio 2:1
     commission_pct: float = 0.001  # 0.1% per trade
     slippage_pct: float = 0.0005  # 0.05% slippage
     window_size: int = 50  # Lookback window (changed from 30)
@@ -326,9 +326,11 @@ class CryptoTradingEnv(gym.Env):
 
         raw_pnl = size * pnl_pct
 
-        # Deduct exit commission
-        commission = size * self.config.commission_pct
-        net_pnl = raw_pnl - commission
+        # Calculate exit commission on the actual exit value (not entry size)
+        # Exit value = size adjusted by price change
+        exit_value = size * (exit_price / entry)
+        exit_commission = exit_value * self.config.commission_pct
+        net_pnl = raw_pnl - exit_commission
 
         # Update balance
         self.balance += size + net_pnl
@@ -493,9 +495,15 @@ class CryptoTradingEnv(gym.Env):
         # 1. Ran out of data
         if self.current_step >= self.max_step:
             truncated = True
-            # Close any open position at market
+            # Close any open position at market with slippage
             if self.position != Position.NONE:
-                self._close_position(self._get_current_price(), "EOD")
+                current_price = self._get_current_price()
+                # Apply slippage: unfavorable direction for the trader
+                if self.current_trade.position_type == Position.LONG:
+                    exit_price = current_price * (1 - self.config.slippage_pct)
+                else:  # SHORT
+                    exit_price = current_price * (1 + self.config.slippage_pct)
+                self._close_position(exit_price, "EOD")
 
         # 2. Bankrupt
         if self.balance <= 0:

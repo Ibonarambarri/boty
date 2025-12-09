@@ -6,8 +6,10 @@ Custom callbacks for Stable-Baselines3 to connect with the TUI dashboard.
 
 from __future__ import annotations
 
+import csv
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +17,9 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 
 from src.dashboard import TradingDashboard
+
+# Action name mapping for CSV logging
+ACTION_NAMES = {0: "HOLD", 1: "LONG", 2: "SHORT"}
 
 
 class TUIDashboardCallback(BaseCallback):
@@ -293,6 +298,151 @@ class EarlyStoppingCallback(BaseCallback):
         return True
 
 
+class CSVLoggerCallback(BaseCallback):
+    """
+    Callback to log detailed per-step metrics to CSV.
+
+    Logs every training step with all available metrics for
+    post-training analysis (e.g., with Gemini or other LLMs).
+    """
+
+    CSV_COLUMNS = [
+        "global_step", "episode", "env_step", "action", "action_name",
+        "reward", "balance", "net_worth", "pnl_pct", "realized_pnl",
+        "position", "total_trades", "winning_trades", "win_rate",
+        "current_price", "done", "timestamp"
+    ]
+
+    def __init__(
+        self,
+        log_dir: str | Path,
+        filename: str = "training_log",
+        include_timestamp: bool = True,
+        buffer_size: int = 1000,
+        flush_on_episode: bool = True,
+        verbose: int = 0,
+    ) -> None:
+        """
+        Initialize CSV logger.
+
+        Args:
+            log_dir: Directory to save CSV file
+            filename: Base filename (without extension)
+            include_timestamp: Add timestamp to filename
+            buffer_size: Rows to buffer before writing to disk
+            flush_on_episode: Flush buffer at end of each episode
+            verbose: Verbosity level
+        """
+        super().__init__(verbose)
+
+        self.log_dir = Path(log_dir)
+        self.filename = filename
+        self.include_timestamp = include_timestamp
+        self.buffer_size = buffer_size
+        self.flush_on_episode = flush_on_episode
+
+        # State
+        self.buffer: list[dict] = []
+        self.csv_path: Optional[Path] = None
+        self.episode_count: int = 0
+        self.header_written: bool = False
+
+    def _on_training_start(self) -> None:
+        """Initialize CSV file on training start."""
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename
+        if self.include_timestamp:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"{self.filename}_{ts}.csv"
+        else:
+            fname = f"{self.filename}.csv"
+
+        self.csv_path = self.log_dir / fname
+        self.header_written = False
+        self.buffer = []
+        self.episode_count = 0
+
+        if self.verbose > 0:
+            print(f"CSV logging to: {self.csv_path}")
+
+    def _on_step(self) -> bool:
+        """Log metrics for each step."""
+        # Extract data from locals
+        infos = self.locals.get("infos", [{}])
+        rewards = self.locals.get("rewards", [0.0])
+        dones = self.locals.get("dones", [False])
+        actions = self.locals.get("actions", [0])
+
+        info = infos[0] if infos else {}
+        reward = float(rewards[0]) if isinstance(rewards, (list, np.ndarray)) else float(rewards)
+        done = bool(dones[0]) if isinstance(dones, (list, np.ndarray)) else bool(dones)
+        action = int(actions[0]) if isinstance(actions, (list, np.ndarray)) else int(actions)
+
+        # Track episode
+        if done:
+            self.episode_count += 1
+
+        # Build row
+        row = {
+            "global_step": self.num_timesteps,
+            "episode": self.episode_count,
+            "env_step": info.get("step", 0),
+            "action": action,
+            "action_name": ACTION_NAMES.get(action, "UNKNOWN"),
+            "reward": reward,
+            "balance": info.get("balance", 0.0),
+            "net_worth": info.get("net_worth", 0.0),
+            "pnl_pct": info.get("pnl_pct", 0.0),
+            "realized_pnl": info.get("realized_pnl", 0.0),
+            "position": info.get("position", "NONE"),
+            "total_trades": info.get("total_trades", 0),
+            "winning_trades": info.get("winning_trades", 0),
+            "win_rate": info.get("win_rate", 0.0),
+            "current_price": info.get("current_price", 0.0),
+            "done": done,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        self.buffer.append(row)
+
+        # Flush conditions
+        should_flush = (
+            len(self.buffer) >= self.buffer_size or
+            (self.flush_on_episode and done)
+        )
+
+        if should_flush:
+            self._flush_buffer()
+
+        return True
+
+    def _flush_buffer(self) -> None:
+        """Write buffer to CSV file."""
+        if not self.buffer or self.csv_path is None:
+            return
+
+        mode = "a" if self.header_written else "w"
+
+        with open(self.csv_path, mode, newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.CSV_COLUMNS)
+
+            if not self.header_written:
+                writer.writeheader()
+                self.header_written = True
+
+            writer.writerows(self.buffer)
+
+        self.buffer = []
+
+    def _on_training_end(self) -> None:
+        """Flush remaining buffer on training end."""
+        self._flush_buffer()
+
+        if self.verbose > 0 and self.csv_path:
+            print(f"CSV log saved: {self.csv_path}")
+
+
 def create_callback_list(
     dashboard: TradingDashboard,
     save_path: str | Path = "models",
@@ -300,6 +450,8 @@ def create_callback_list(
     update_freq: int = 100,
     early_stopping: bool = False,
     reward_threshold: Optional[float] = None,
+    enable_csv_logging: bool = False,
+    csv_buffer_size: int = 1000,
 ) -> list[BaseCallback]:
     """
     Create a list of callbacks for training.
@@ -311,6 +463,8 @@ def create_callback_list(
         update_freq: Dashboard update frequency
         early_stopping: Enable early stopping
         reward_threshold: Early stopping reward threshold
+        enable_csv_logging: Enable detailed CSV logging per step
+        csv_buffer_size: Buffer size for CSV logger
 
     Returns:
         List of callbacks
@@ -332,6 +486,18 @@ def create_callback_list(
                 reward_threshold=reward_threshold,
                 patience=50,
                 min_episodes=100,
+                verbose=1,
+            )
+        )
+
+    if enable_csv_logging:
+        callbacks.append(
+            CSVLoggerCallback(
+                log_dir=save_path,
+                filename="training_log",
+                include_timestamp=True,
+                buffer_size=csv_buffer_size,
+                flush_on_episode=True,
                 verbose=1,
             )
         )
