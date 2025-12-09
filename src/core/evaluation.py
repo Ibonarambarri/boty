@@ -368,12 +368,16 @@ class AgentEvaluator:
 
         # Build result
         window = 50 if self.multi_tf_mode else 30
+        # Ensure prices array matches equity array lengths
+        prices_aligned = self.prices[window:]
+        prices_aligned = prices_aligned[:min_len]
+
         result = EvaluationResult(
             agent_equity=agent_equity,
             buy_hold_equity=buy_hold_equity,
             random_equity=random_equity,
             trades=trades,
-            prices=self.prices[window:window+min_len],
+            prices=prices_aligned,
             total_return=agent_metrics['total_return'],
             buy_hold_return=buy_hold_metrics['total_return'],
             sharpe_ratio=agent_metrics['sharpe_ratio'],
