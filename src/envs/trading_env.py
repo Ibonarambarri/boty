@@ -1,8 +1,9 @@
 """
 Crypto Trading Environment
 ==========================
-Custom Gymnasium environment for cryptocurrency trading with DRL.
-Supports multi-timeframe observations.
+Custom Gymnasium environment for cryptocurrency Swing Trading with DRL.
+Supports multi-timeframe observations (1h, 1d).
+Simplified reward function for better convergence.
 """
 
 from __future__ import annotations
@@ -49,21 +50,21 @@ class Trade:
 
 @dataclass
 class EnvConfig:
-    """Environment configuration for dynamic position management."""
+    """Environment configuration for Crypto Swing Trading."""
     initial_balance: float = 10_000.0
     position_size_pct: float = 1.0  # Max position size (agent controls via action magnitude)
-    commission_pct: float = 0.001  # 0.1% per trade
+    commission_pct: float = 0.001  # 0.1% per trade (Binance spot fee)
     slippage_pct: float = 0.0005  # 0.05% slippage
     window_size: int = 50  # Lookback window
-    reward_scaling: float = 100.0  # Scale rewards for stability
 
-    # Trading frequency control
-    trade_penalty: float = 0.0005  # Small penalty per trade to discourage overtrading
+    # SIMPLIFIED REWARD: Only log return + liquidation penalty
+    # Removed: reward_scaling, trade_penalty, volatility_penalty, inaction_penalty, bag_holding_penalty
+    liquidation_penalty: float = -10.0  # Penalty for forced liquidation
 
-    # Multi-timeframe configuration
-    timeframes: list[str] = field(default_factory=lambda: ['1d', '1wk', '1mo'])
-    features_per_timeframe: int = 15
-    base_timeframe: str = '1d'
+    # Multi-timeframe configuration (1h, 1d for crypto swing trading)
+    timeframes: list[str] = field(default_factory=lambda: ['1h', '1d'])
+    features_per_timeframe: int = 17
+    base_timeframe: str = '1h'
 
     # Risk Protection (forced liquidation)
     liquidation_threshold: float = 0.1  # Force close if net_worth < 10% of initial
@@ -71,16 +72,20 @@ class EnvConfig:
 
 class CryptoTradingEnv(gym.Env):
     """
-    Cryptocurrency Trading Environment.
+    Cryptocurrency Swing Trading Environment.
+
+    SIMPLIFIED for better DRL convergence:
+    - Reward = log return ONLY (clean signal)
+    - Liquidation penalty (-10) if account burns
 
     Features:
     - Continuous actions: [-1, +1] where magnitude = position size %, sign = direction
-    - Position management with TP/SL
-    - Realistic commission modeling
-    - Multi-timeframe observation support
+    - Agent controls ALL entries/exits (no automatic TP/SL)
+    - Realistic commission modeling (0.1% Binance fee)
+    - Multi-timeframe observation support (1h, 1d)
 
     Observation space for multi-timeframe (default):
-    - 50 bars x 15 features x 3 timeframes = 2250 values
+    - 17 features x 2 timeframes = 34 values per step
 
     API v26+ compliant.
     """
@@ -232,10 +237,6 @@ class CryptoTradingEnv(gym.Env):
 
         # Pending order for T+1 execution (realistic simulation)
         self._pending_order: Optional[dict] = None
-
-        # Reward calculation history
-        self._return_history: list[float] = []
-        self._holding_negative_steps: int = 0
 
     def _get_observation(self) -> np.ndarray:
         """
@@ -531,11 +532,9 @@ class CryptoTradingEnv(gym.Env):
         - Negative values = SHORT position (magnitude = % of capital)
         - Near zero (|action| < 0.05) = Close position / stay neutral
 
-        REWARD FUNCTION (Multi-component):
-        - Component 1: Log return of net worth change
-        - Component 2: Volatility penalty (-0.1 * std of recent returns)
-        - Component 3: Inaction penalty (if NONE during strong trend)
-        - Component 4: Bag holding penalty (if losing position held too long)
+        SIMPLIFIED REWARD FUNCTION (for better DRL convergence):
+        - Log return of net worth change ONLY
+        - Liquidation penalty (-10) if account burns
 
         Args:
             action: Continuous action in [-1, +1]
@@ -581,24 +580,11 @@ class CryptoTradingEnv(gym.Env):
             target_position = Position.SHORT
             target_size_pct = abs(action_value)  # 0.0 to 1.0
 
-        # Check if position changed (for trade penalty)
-        position_changed = (
-            self.position == Position.NONE and target_position != Position.NONE
-        ) or (
-            self.position != Position.NONE and target_position != self.position
-        )
-
         # Execute position transition at T+1 Open price
         self._transition_position(target_position, target_size_pct, execution_price=next_open)
 
-        # Apply trade penalty if we opened/changed position
-        if position_changed:
-            reward -= self.config.trade_penalty * target_size_pct
-
         # Advance step (now at T+1)
         self.current_step += 1
-
-        # NO TP/SL CHECK - Agent has full control over exits
 
         # Check termination
         terminated = False
@@ -631,64 +617,18 @@ class CryptoTradingEnv(gym.Env):
                     exit_price = current_price * (1 + self.config.slippage_pct)
                 self._close_position(exit_price, "LIQUIDATION")
             terminated = True
-            reward = -10.0  # Large negative reward for liquidation
+            reward = self.config.liquidation_penalty  # -10.0 by default
 
-        # Calculate multi-component reward (if not already terminated)
+        # SIMPLIFIED REWARD: Only log return (PnL)
         elif self.balance <= 0:
             terminated = True
-            reward = -10.0  # Large negative reward for bankruptcy
+            reward = self.config.liquidation_penalty  # -10.0 by default
         else:
-            # === COMPONENT 1: Log Return (PnL) ===
+            # === SIMPLE LOG RETURN REWARD ===
+            # Clean signal for PPO to learn from
             if prev_net_worth > 0 and current_net_worth > 0:
                 log_return = np.log(current_net_worth / prev_net_worth)
-                reward += log_return
-
-                # Track return history for volatility calculation
-                self._return_history.append(log_return)
-                if len(self._return_history) > 10:
-                    self._return_history.pop(0)
-
-            # === COMPONENT 2: Volatility Penalty ===
-            if len(self._return_history) >= 5:
-                returns_std = np.std(self._return_history)
-                volatility_penalty = 0.1 * returns_std
-                reward -= volatility_penalty
-
-            # === COMPONENT 3: Inaction Penalty (missed strong trends) ===
-            # Only penalize if no position during strong trend
-            if self.position == Position.NONE:
-                # Simple momentum proxy: 5-period return magnitude
-                if self.current_step >= 5:
-                    price_now = self._get_current_price()
-                    price_5_ago = float(self._ohlc[self.current_step - 5, 3])
-                    momentum = abs(price_now / price_5_ago - 1)
-                    # If momentum > 2% and no position, small penalty
-                    if momentum > 0.02:
-                        inaction_penalty = 0.0001
-                        reward -= inaction_penalty
-
-            # === COMPONENT 4: Bag Holding Penalty ===
-            if self.current_trade is not None:
-                # Calculate unrealized PnL
-                current_price = self._get_current_price()
-                entry = self.current_trade.entry_price
-                if self.current_trade.position_type == Position.LONG:
-                    unrealized_pnl_pct = (current_price - entry) / entry
-                else:
-                    unrealized_pnl_pct = (entry - current_price) / entry
-
-                # If losing money
-                if unrealized_pnl_pct < 0:
-                    self._holding_negative_steps += 1
-                    # Progressive penalty after 10 steps of holding a loser
-                    if self._holding_negative_steps > 10:
-                        excess_steps = self._holding_negative_steps - 10
-                        bag_holding_penalty = 0.0001 * excess_steps
-                        reward -= bag_holding_penalty
-                else:
-                    self._holding_negative_steps = 0
-            else:
-                self._holding_negative_steps = 0
+                reward = log_return
 
         self.total_reward += reward
 
@@ -788,7 +728,7 @@ def make_trading_env(
 
 
 if __name__ == "__main__":
-    # Test environment
+    # Test environment for Crypto Swing Trading
     from rich.console import Console
 
     console = Console()
@@ -801,14 +741,14 @@ if __name__ == "__main__":
     np.random.seed(42)
     n = 1000
     dates = pd.date_range("2024-01-01", periods=n, freq="h")
-    price = 40000 + np.cumsum(np.random.randn(n) * 100)
+    price = 50000 + np.cumsum(np.random.randn(n) * 100)  # BTC-like price
 
     df_single = pd.DataFrame({
         "open": price,
         "high": price + abs(np.random.randn(n) * 50),
         "low": price - abs(np.random.randn(n) * 50),
         "close": price + np.random.randn(n) * 20,
-        "volume": np.random.randint(1000, 10000, n),
+        "volume": np.random.randint(100, 1000, n),
         # Dummy features
         "log_return": np.random.randn(n) * 0.01,
         "rsi_norm": np.random.randn(n) * 0.5,
@@ -825,36 +765,35 @@ if __name__ == "__main__":
     console.print(f"Initial obs shape: {obs.shape}")
 
     # =========================================================================
-    # Test 2: Multi-timeframe
+    # Test 2: Multi-timeframe (1h, 1d for Crypto Swing Trading)
     # =========================================================================
-    console.print("\n[bold]Test 2: Multi-Timeframe Environment[/bold]")
+    console.print("\n[bold]Test 2: Multi-Timeframe Environment (1h, 1d)[/bold]")
 
     # Create multi-timeframe data
     df_multi = pd.DataFrame(index=dates)
 
-    for tf in ['1d', '1wk', '1mo']:
+    for tf in ['1h', '1d']:
         df_multi[f'open_{tf}'] = price + np.random.randn(n) * 10
         df_multi[f'high_{tf}'] = price + abs(np.random.randn(n) * 50)
         df_multi[f'low_{tf}'] = price - abs(np.random.randn(n) * 50)
         df_multi[f'close_{tf}'] = price + np.random.randn(n) * 20
-        df_multi[f'volume_{tf}'] = np.random.randint(1000, 10000, n)
+        df_multi[f'volume_{tf}'] = np.random.randint(100, 1000, n)
         # Features
         df_multi[f'log_return_{tf}'] = np.random.randn(n) * 0.01
         df_multi[f'rsi_norm_{tf}'] = np.random.randn(n) * 0.5
         df_multi[f'macd_norm_{tf}'] = np.random.randn(n) * 0.1
 
     feature_map = {
+        '1h': ['log_return_1h', 'rsi_norm_1h', 'macd_norm_1h'],
         '1d': ['log_return_1d', 'rsi_norm_1d', 'macd_norm_1d'],
-        '1wk': ['log_return_1wk', 'rsi_norm_1wk', 'macd_norm_1wk'],
-        '1mo': ['log_return_1mo', 'rsi_norm_1mo', 'macd_norm_1mo'],
     }
 
     env_multi = make_trading_env(
         df_multi,
         feature_map,
         window_size=50,
-        timeframes=['1d', '1wk', '1mo'],
-        base_timeframe='1d',
+        timeframes=['1h', '1d'],
+        base_timeframe='1h',
     )
 
     console.print(f"Observation space: {env_multi.observation_space}")
@@ -862,7 +801,7 @@ if __name__ == "__main__":
 
     obs, info = env_multi.reset()
     console.print(f"Initial obs shape: {obs.shape}")
-    console.print(f"Expected: {50 * 3 * 3} = {50 * 9}")
+    console.print(f"Expected: 3 features x 2 timeframes = 6")
 
     # Run test episode
     total_reward = 0
@@ -881,9 +820,9 @@ if __name__ == "__main__":
     console.print(f"Trades: {info['total_trades']}")
 
     # =========================================================================
-    # Test 3: Full features (15 per timeframe)
+    # Test 3: Full features (17 per timeframe for Crypto Swing)
     # =========================================================================
-    console.print("\n[bold]Test 3: Full Features (15 per timeframe)[/bold]")
+    console.print("\n[bold]Test 3: Full Features (17 per timeframe)[/bold]")
 
     # Create full feature set
     df_full = pd.DataFrame(index=dates)
@@ -891,40 +830,41 @@ if __name__ == "__main__":
     features_list = [
         'log_return', 'log_return_high', 'log_return_low',
         'rsi_norm', 'macd_norm', 'macd_hist_norm',
-        'bb_position', 'atr_norm',
+        'bb_position', 'atr_pct',
         'volume_norm', 'volume_ratio',
         'return_5', 'return_10', 'return_20',
         'candle_body_ratio', 'candle_direction',
+        'dist_to_sma200', 'volatility_regime',
     ]
 
-    for tf in ['1d', '1wk', '1mo']:
+    for tf in ['1h', '1d']:
         df_full[f'open_{tf}'] = price + np.random.randn(n) * 10
         df_full[f'high_{tf}'] = price + abs(np.random.randn(n) * 50)
         df_full[f'low_{tf}'] = price - abs(np.random.randn(n) * 50)
         df_full[f'close_{tf}'] = price + np.random.randn(n) * 20
-        df_full[f'volume_{tf}'] = np.random.randint(1000, 10000, n)
+        df_full[f'volume_{tf}'] = np.random.randint(100, 1000, n)
 
         for feat in features_list:
             df_full[f'{feat}_{tf}'] = np.random.randn(n) * 0.1
 
     feature_map_full = {
         tf: [f'{feat}_{tf}' for feat in features_list]
-        for tf in ['1d', '1wk', '1mo']
+        for tf in ['1h', '1d']
     }
 
     env_full = make_trading_env(
         df_full,
         feature_map_full,
         window_size=50,
-        timeframes=['1d', '1wk', '1mo'],
-        features_per_timeframe=15,
-        base_timeframe='1d',
+        timeframes=['1h', '1d'],
+        features_per_timeframe=17,
+        base_timeframe='1h',
     )
 
     console.print(f"Observation space: {env_full.observation_space}")
-    console.print(f"Expected obs dim: {50 * 15 * 3} = 2250")
+    console.print(f"Expected obs dim: 17 x 2 = 34")
 
     obs, info = env_full.reset()
     console.print(f"Actual obs shape: {obs.shape}")
 
-    console.print("\n[green]All tests passed![/green]")
+    console.print("\n[green]All Crypto Swing Trading tests passed![/green]")

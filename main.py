@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Crypto DRL Trading System
-=========================
-End-to-end Deep Reinforcement Learning system for cryptocurrency trading.
-Supports multi-timeframe observations (1d, 1wk, 1mo).
+Crypto DRL Swing Trading System
+===============================
+End-to-end Deep Reinforcement Learning system for CRYPTOCURRENCY swing trading.
+Uses Binance data via CCXT with multi-timeframe observations (1h, 1d).
 
 Usage:
-    python main.py download --ticker AAPL --years 10
-    python main.py train --ticker AAPL --timesteps 100000
-    python main.py evaluate --model models/AAPL/multi_tf/...
+    python main.py download --ticker BTC/USDT --days 730
+    python main.py train --ticker BTC/USDT --timesteps 100000
+    python main.py evaluate --model models/BTC_USDT/multi_tf/...
     python main.py demo
 """
 
@@ -26,7 +26,7 @@ from rich.table import Table
 from rich.text import Text
 
 # Project imports
-from src.data.data_downloader import YahooDownloader
+from src.data.data_downloader import BinanceDownloader
 from src.data.feature_engineering import (
     add_technical_indicators,
     add_technical_indicators_multi_tf,
@@ -43,120 +43,105 @@ console = Console()
 def print_banner() -> None:
     """Print application banner."""
     console.print(Panel(
-        "[bold cyan]CRYPTO DRL[/bold cyan]",
-        title="[bold white]Deep Reinforcement Learning Trading System[/bold white]",
-        subtitle="[dim]v2.0.0 - Multi-Timeframe (1d/1wk/1mo)[/dim]",
+        "[bold cyan]CRYPTO DRL SWING TRADER[/bold cyan]",
+        title="[bold white]Deep Reinforcement Learning for Crypto[/bold white]",
+        subtitle="[dim]v3.0.0 - Multi-Timeframe (1h/1d) - Binance[/dim]",
         border_style="cyan",
     ))
 
 
 def cmd_download(args: argparse.Namespace) -> None:
-    """Download multi-timeframe historical data using Yahoo Finance."""
-    console.print(f"\n[bold]Downloading {args.ticker} multi-timeframe data...[/bold]\n")
+    """Download multi-timeframe historical crypto data from Binance."""
+    console.print(f"\n[bold]Downloading {args.ticker} crypto data from Binance...[/bold]\n")
 
-    downloader = YahooDownloader(data_dir=args.data_dir)
+    downloader = BinanceDownloader(data_dir=args.data_dir)
 
     # Download and save
     save_dir = downloader.download_and_save(
-        ticker=args.ticker,
-        years=args.years,
+        symbol=args.ticker,
+        days=args.days,
         train_ratio=args.train_ratio,
     )
 
     if save_dir is not None:
         # Show summary
-        table = Table(title="Download Summary")
+        table = Table(title="Crypto Data Download Summary")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
 
-        table.add_row("Ticker", args.ticker)
-        table.add_row("Years", str(args.years))
-        table.add_row("Timeframes", "1d (daily), 1wk (weekly), 1mo (monthly)")
+        table.add_row("Symbol", args.ticker)
+        table.add_row("Days", str(args.days))
+        table.add_row("Timeframes", "1h (hourly), 1d (daily)")
+        table.add_row("Exchange", "Binance")
         table.add_row("Directory", str(save_dir))
 
         console.print(table)
     else:
-        console.print("[red]Download failed[/red]")
+        console.print("[red]Download failed - check symbol format (e.g., BTC/USDT)[/red]")
 
 
 def cmd_train(args: argparse.Namespace) -> None:
-    """Train PPO agent with multi-timeframe data."""
-    console.print("\n[bold]Preparing training data...[/bold]\n")
+    """Train PPO agent with multi-timeframe crypto data."""
+    console.print("\n[bold]Preparing crypto training data...[/bold]\n")
+
+    # Normalize ticker for file path (BTC/USDT -> BTC_USDT)
+    ticker_safe = args.ticker.replace('/', '_')
 
     # Find latest data directory
-    data_dir = find_latest_data(args.ticker, args.data_dir)
+    data_dir = find_latest_data(ticker_safe, args.data_dir)
 
     if data_dir is None:
         console.print(f"[red]No data found for {args.ticker}[/red]")
-        console.print("[yellow]Run 'python main.py download' first[/yellow]")
+        console.print("[yellow]Run 'python main.py download --ticker {args.ticker}' first[/yellow]")
         sys.exit(1)
 
-    # Check for parquet or csv
+    # Check for parquet
     train_path = data_dir / "train.parquet"
     is_multi_tf = True
 
     if not train_path.exists():
-        # Try legacy CSV format
-        train_path = data_dir / "train.csv"
-        is_multi_tf = False
-        if not train_path.exists():
-            console.print(f"[red]train.parquet/csv not found in {data_dir}[/red]")
-            sys.exit(1)
+        console.print(f"[red]train.parquet not found in {data_dir}[/red]")
+        sys.exit(1)
 
-    console.print(f"[cyan]Loading training data from: {train_path}[/cyan]")
+    console.print(f"[cyan]Loading crypto training data from: {train_path}[/cyan]")
 
     # Load data
-    if train_path.suffix == ".parquet":
-        df = pd.read_parquet(train_path)
-    else:
-        df = pd.read_csv(train_path, index_col=0, parse_dates=True)
+    df = pd.read_parquet(train_path)
 
-    console.print(f"[green]Loaded {len(df):,} rows for training[/green]")
+    console.print(f"[green]Loaded {len(df):,} hourly candles for training[/green]")
 
-    # Process features based on data type
-    if is_multi_tf:
-        # Multi-timeframe data
-        df = add_technical_indicators_multi_tf(df)
-        df, feature_map = prepare_features_for_env_multi_tf(df)
-        feature_columns = feature_map  # dict for multi-tf
+    # Process features (always multi-timeframe for crypto)
+    df = add_technical_indicators_multi_tf(df)
+    df, feature_map = prepare_features_for_env_multi_tf(df)
+    feature_columns = feature_map  # dict for multi-tf
 
-        console.print(f"[green]Prepared multi-timeframe features:[/green]")
-        for tf, features in feature_map.items():
-            console.print(f"  {tf}: {len(features)} features")
-    else:
-        # Single timeframe data (legacy)
-        df = add_technical_indicators(df)
-        df, feature_columns = prepare_features_for_env(df)
-        console.print(f"[green]Prepared {len(feature_columns)} features[/green]")
+    console.print(f"[green]Prepared multi-timeframe features:[/green]")
+    for tf, features in feature_map.items():
+        console.print(f"  {tf}: {len(features)} features")
 
     # Show feature stats
     if args.verbose:
-        if isinstance(feature_columns, dict):
-            for tf, features in feature_columns.items():
-                stats = get_feature_stats(df, features)
-                console.print(f"\n[bold]Feature Statistics ({tf}):[/bold]")
-                console.print(stats.head(5).to_string())
-        else:
-            stats = get_feature_stats(df, feature_columns)
-            console.print("\n[bold]Feature Statistics:[/bold]")
-            console.print(stats.to_string())
+        for tf, features in feature_columns.items():
+            stats = get_feature_stats(df, features)
+            console.print(f"\n[bold]Feature Statistics ({tf}):[/bold]")
+            console.print(stats.head(5).to_string())
 
-    # Training config
+    # Training config for crypto swing trading
     config = TrainingConfig(
         total_timesteps=args.timesteps,
         learning_rate=args.lr,
         initial_balance=args.balance,
         save_freq=args.save_freq,
         window_size=args.window,
-        # Multi-timeframe settings
-        timeframes=['1d', '1wk', '1mo'] if is_multi_tf else None,
-        features_per_timeframe=15 if is_multi_tf else None,
-        base_timeframe='1d' if is_multi_tf else None,
+        # Crypto swing trading: 1h base + 1d context
+        timeframes=['1h', '1d'],
+        features_per_timeframe=17,
+        base_timeframe='1h',
     )
 
     # Model save directory
     date_range = data_dir.name
-    model_save_dir = Path("models") / args.ticker / "multi_tf" / date_range
+    model_save_dir = Path("models") / ticker_safe / "multi_tf" / date_range
 
     # Train
     model, model_dir = train(
@@ -167,7 +152,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         resume_from=args.resume,
     )
 
-    console.print(f"\n[bold green]Training complete![/bold green]")
+    console.print(f"\n[bold green]Crypto swing trading model trained![/bold green]")
     console.print(f"[green]Model saved to: {model_dir}/[/green]")
 
 
@@ -353,35 +338,35 @@ def cmd_live(args: argparse.Namespace) -> None:
 
 
 def cmd_demo(args: argparse.Namespace) -> None:
-    """Run a quick demo with synthetic multi-timeframe data."""
+    """Run a quick demo with synthetic crypto multi-timeframe data."""
     import numpy as np
 
-    console.print("\n[bold]Running Demo Mode (Multi-Timeframe)[/bold]\n")
-    console.print("[yellow]Using synthetic data for demonstration[/yellow]\n")
+    console.print("\n[bold]Running Crypto Swing Trading Demo[/bold]\n")
+    console.print("[yellow]Using synthetic BTC-like data for demonstration[/yellow]\n")
 
-    # Generate synthetic price data
+    # Generate synthetic BTC price data
     np.random.seed(42)
     n = 3000
-    price = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    price = 50000 + np.cumsum(np.random.randn(n) * 100)  # BTC-like volatility
 
-    # Create multi-timeframe data
+    # Create multi-timeframe data (1h, 1d for crypto swing)
     df = pd.DataFrame()
 
-    for tf in ['1d', '1wk', '1mo']:
-        df[f'open_{tf}'] = price + np.random.randn(n) * 0.1
-        df[f'high_{tf}'] = price + abs(np.random.randn(n) * 0.5)
-        df[f'low_{tf}'] = price - abs(np.random.randn(n) * 0.5)
-        df[f'close_{tf}'] = price + np.random.randn(n) * 0.1
-        df[f'volume_{tf}'] = np.random.randint(1000, 10000, n)
+    for tf in ['1h', '1d']:
+        df[f'open_{tf}'] = price + np.random.randn(n) * 10
+        df[f'high_{tf}'] = price + abs(np.random.randn(n) * 50)
+        df[f'low_{tf}'] = price - abs(np.random.randn(n) * 50)
+        df[f'close_{tf}'] = price + np.random.randn(n) * 10
+        df[f'volume_{tf}'] = np.random.randint(100, 1000, n)
 
     # Add features
     df = add_technical_indicators_multi_tf(df)
     df, feature_map = prepare_features_for_env_multi_tf(df)
 
     total_features = sum(len(f) for f in feature_map.values())
-    console.print(f"[green]Generated {len(df)} samples with {total_features} features (3 timeframes)[/green]\n")
+    console.print(f"[green]Generated {len(df)} hourly samples with {total_features} features (2 timeframes)[/green]\n")
 
-    # Quick training
+    # Quick training config for crypto
     config = TrainingConfig(
         total_timesteps=args.timesteps,
         save_freq=args.timesteps // 2,
@@ -389,19 +374,19 @@ def cmd_demo(args: argparse.Namespace) -> None:
         n_steps=512,
         batch_size=64,
         window_size=50,
-        timeframes=['1d', '1wk', '1mo'],
-        features_per_timeframe=15,
-        base_timeframe='1d',
+        timeframes=['1h', '1d'],
+        features_per_timeframe=17,
+        base_timeframe='1h',
     )
 
     model, path = train(
         df=df,
         feature_columns=feature_map,
         config=config,
-        model_name="demo_multi_tf",
+        model_name="demo_crypto_swing",
     )
 
-    console.print("\n[bold green]Demo complete![/bold green]")
+    console.print("\n[bold green]Crypto swing trading demo complete![/bold green]")
 
 
 def find_latest_data(
@@ -440,25 +425,25 @@ def main() -> None:
     print_banner()
 
     parser = argparse.ArgumentParser(
-        description="Crypto DRL Trading System (Multi-Timeframe)",
+        description="Crypto DRL Swing Trading System (Multi-Timeframe 1h/1d)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # Download command
-    dl_parser = subparsers.add_parser("download", help="Download multi-timeframe historical data")
-    dl_parser.add_argument("--ticker", default="AAPL", help="Ticker symbol (e.g., AAPL, BTC-USD, MSFT)")
-    dl_parser.add_argument("--years", type=int, default=10, help="Years of history to download")
+    # Download command - CRYPTO ONLY via Binance
+    dl_parser = subparsers.add_parser("download", help="Download crypto data from Binance")
+    dl_parser.add_argument("--ticker", default="BTC/USDT", help="Crypto pair (e.g., BTC/USDT, ETH/USDT)")
+    dl_parser.add_argument("--days", type=int, default=730, help="Days of history (default: 730 = 2 years)")
     dl_parser.add_argument("--train-ratio", type=float, default=0.8, help="Train/eval split ratio")
     dl_parser.add_argument("--data-dir", default="data", help="Data directory")
 
     # Train command
-    train_parser = subparsers.add_parser("train", help="Train PPO agent with multi-timeframe data")
-    train_parser.add_argument("--ticker", default="AAPL", help="Ticker symbol")
+    train_parser = subparsers.add_parser("train", help="Train PPO agent for crypto swing trading")
+    train_parser.add_argument("--ticker", default="BTC/USDT", help="Crypto pair (e.g., BTC/USDT)")
     train_parser.add_argument("--timesteps", type=int, default=100_000, help="Training steps")
     train_parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    train_parser.add_argument("--balance", type=float, default=10_000, help="Initial balance")
+    train_parser.add_argument("--balance", type=float, default=10_000, help="Initial balance (USDT)")
     train_parser.add_argument("--window", type=int, default=50, help="Observation window (default: 50)")
     train_parser.add_argument("--save-freq", type=int, default=10_000, help="Checkpoint frequency")
     train_parser.add_argument("--data-dir", default="data", help="Data directory")
@@ -466,9 +451,9 @@ def main() -> None:
     train_parser.add_argument("--verbose", action="store_true", help="Verbose output")
 
     # Evaluate command
-    eval_parser = subparsers.add_parser("evaluate", help="Evaluate trained model")
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate trained crypto model")
     eval_parser.add_argument("--model", required=True, help="Path to model directory")
-    eval_parser.add_argument("--balance", type=float, default=10_000, help="Initial balance")
+    eval_parser.add_argument("--balance", type=float, default=10_000, help="Initial balance (USDT)")
     eval_parser.add_argument("--data-dir", default="data", help="Data directory")
     eval_parser.add_argument("--no-plot", action="store_true", help="Skip plot generation")
     eval_parser.add_argument("--no-random", action="store_true", help="Skip random agent baseline")
@@ -477,33 +462,33 @@ def main() -> None:
 
     # Optimize command
     opt_parser = subparsers.add_parser("optimize", help="Run hyperparameter optimization")
-    opt_parser.add_argument("--ticker", default="AAPL", help="Ticker symbol to optimize for")
+    opt_parser.add_argument("--ticker", default="BTC/USDT", help="Crypto pair to optimize for")
     opt_parser.add_argument("--trials", type=int, default=100, help="Number of optimization trials")
     opt_parser.add_argument("--data-dir", default="data", help="Data directory")
 
     # Live trading command
-    live_parser = subparsers.add_parser("live", help="Run live trading bot")
+    live_parser = subparsers.add_parser("live", help="Run live crypto trading bot")
     live_parser.add_argument("--model", required=True, help="Path to trained model file")
-    live_parser.add_argument("--ticker", default="BTC/USDT", help="Ticker symbol for trading")
-    live_parser.add_argument("--exchange", default="binance", help="Exchange ID (e.g., binance, coinbasepro)")
-    live_parser.add_argument("--amount", type=float, default=100.0, help="Amount in quote currency for trades")
+    live_parser.add_argument("--ticker", default="BTC/USDT", help="Crypto pair for trading")
+    live_parser.add_argument("--exchange", default="binance", help="Exchange ID (e.g., binance)")
+    live_parser.add_argument("--amount", type=float, default=100.0, help="Amount in USDT per trade")
 
     # Demo command
-    demo_parser = subparsers.add_parser("demo", help="Run quick demo with synthetic data")
+    demo_parser = subparsers.add_parser("demo", help="Run quick demo with synthetic crypto data")
     demo_parser.add_argument("--timesteps", type=int, default=5_000, help="Demo training steps")
 
     args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
-        console.print("\n[yellow]Usage examples:[/yellow]")
-        console.print("  python main.py demo                         # Quick demo with synthetic data")
-        console.print("  python main.py download --ticker AAPL       # Download 10 years of data")
-        console.print("  python main.py download --ticker BTC-USD    # Download crypto data")
-        console.print("  python main.py train --ticker AAPL --timesteps 50000")
-        console.print("  python main.py evaluate --model models/AAPL/multi_tf/...")
-        console.print("\n[cyan]Multi-timeframe: The agent sees 50 bars of 1d, 1wk, and 1mo data simultaneously[/cyan]")
-        console.print("[cyan]Context: From ~2.5 months (daily) to ~4 years (monthly) of market history[/cyan]")
+        console.print("\n[yellow]Usage examples (Crypto Only):[/yellow]")
+        console.print("  python main.py demo                              # Quick demo with synthetic BTC data")
+        console.print("  python main.py download --ticker BTC/USDT        # Download 2 years of BTC hourly data")
+        console.print("  python main.py download --ticker ETH/USDT --days 365")
+        console.print("  python main.py train --ticker BTC/USDT --timesteps 50000")
+        console.print("  python main.py evaluate --model models/BTC_USDT/multi_tf/...")
+        console.print("\n[cyan]Crypto Swing Trading: 1h (base) + 1d (context) timeframes[/cyan]")
+        console.print("[cyan]Agent sees 50 bars of hourly data with daily context for swing trades[/cyan]")
         sys.exit(0)
 
     # Execute command

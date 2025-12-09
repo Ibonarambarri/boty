@@ -1,8 +1,8 @@
 """
 Training Module
 ===============
-PPO training pipeline with TUI dashboard visualization.
-Supports multi-timeframe observations.
+PPO training pipeline for Crypto Swing Trading with TUI dashboard.
+Supports multi-timeframe observations (1h, 1d).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class TrainingConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    ent_coef: float = 0.005  # Reduced for exploitation over exploration
+    ent_coef: float = 0.02  # Increased for better initial exploration (CRITICAL for DRL convergence)
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
@@ -83,11 +83,11 @@ class TrainingConfig:
         if self.net_arch is None:
             self.net_arch = [256, 256]  # Increased from [64, 64] for more capacity
         if self.timeframes is None:
-            self.timeframes = ['1d', '1wk']  # Removed '1mo' to reduce noise
+            self.timeframes = ['1h', '1d']  # Crypto swing trading: hourly base + daily context
         if self.features_per_timeframe is None:
-            self.features_per_timeframe = 15
+            self.features_per_timeframe = 17  # Default feature count
         if self.base_timeframe is None:
-            self.base_timeframe = '1d'
+            self.base_timeframe = '1h'  # Hourly as base for swing trading
 
 
 def create_env(
@@ -150,7 +150,8 @@ def create_vec_env(
         vec_env = VecNormalize(
             vec_env,
             norm_obs=True,
-            norm_reward=False,  # Disabled: log returns are already small-scale
+            norm_reward=True,  # CRITICAL: Must be True for PPO to learn properly!
+            gamma=0.99,  # Match PPO gamma for correct reward normalization
             clip_obs=10.0,
             clip_reward=10.0,
         )
@@ -404,22 +405,22 @@ def evaluate(
 
 
 if __name__ == "__main__":
-    # Test training with multi-timeframe dummy data
+    # Test training with multi-timeframe dummy data (Crypto Swing Trading)
     np.random.seed(42)
 
     # Create dummy multi-timeframe data
     n = 5000
-    price = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    price = 50000 + np.cumsum(np.random.randn(n) * 100)  # BTC-like price
 
     df = pd.DataFrame()
 
-    # Create columns for each timeframe (removed 1mo to reduce noise)
-    for tf in ['1d', '1wk']:
-        df[f'open_{tf}'] = price + np.random.randn(n) * 0.1
-        df[f'high_{tf}'] = price + abs(np.random.randn(n) * 0.5)
-        df[f'low_{tf}'] = price - abs(np.random.randn(n) * 0.5)
-        df[f'close_{tf}'] = price + np.random.randn(n) * 0.1
-        df[f'volume_{tf}'] = np.random.randint(1000, 10000, n)
+    # Create columns for each timeframe (1h, 1d for crypto swing trading)
+    for tf in ['1h', '1d']:
+        df[f'open_{tf}'] = price + np.random.randn(n) * 10
+        df[f'high_{tf}'] = price + abs(np.random.randn(n) * 50)
+        df[f'low_{tf}'] = price - abs(np.random.randn(n) * 50)
+        df[f'close_{tf}'] = price + np.random.randn(n) * 10
+        df[f'volume_{tf}'] = np.random.randint(100, 1000, n)
 
         # Features (3 per timeframe for testing)
         df[f'log_return_{tf}'] = np.random.randn(n) * 0.01
@@ -428,8 +429,8 @@ if __name__ == "__main__":
 
     # Feature map for multi-timeframe
     feature_map = {
+        '1h': ['log_return_1h', 'rsi_norm_1h', 'macd_norm_1h'],
         '1d': ['log_return_1d', 'rsi_norm_1d', 'macd_norm_1d'],
-        '1wk': ['log_return_1wk', 'rsi_norm_1wk', 'macd_norm_1wk'],
     }
 
     # Quick training config for testing
@@ -440,12 +441,12 @@ if __name__ == "__main__":
         n_steps=512,
         batch_size=32,
         window_size=50,
-        timeframes=['1d', '1wk'],
+        timeframes=['1h', '1d'],
         features_per_timeframe=3,  # Only 3 for test
-        base_timeframe='1d',
+        base_timeframe='1h',
     )
 
     # Train
-    model, path = train(df, feature_map, config, model_name="test_multi_tf")
+    model, path = train(df, feature_map, config, model_name="test_crypto_swing")
 
-    console.print("\n[bold green]Multi-timeframe training test complete![/bold green]")
+    console.print("\n[bold green]Crypto swing trading test complete![/bold green]")
