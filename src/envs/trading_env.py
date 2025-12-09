@@ -20,18 +20,18 @@ from gymnasium import spaces
 logger = logging.getLogger(__name__)
 
 
-class Action(IntEnum):
-    """Trading actions."""
-    HOLD = 0
-    LONG = 1
-    SHORT = 2
-
-
 class Position(IntEnum):
     """Position states."""
     NONE = 0
     LONG = 1
     SHORT = 2
+
+
+# Threshold for neutral zone (|action| < threshold = close/no position)
+NEUTRAL_THRESHOLD = 0.05
+
+# Minimum size change to trigger rebalancing (5%)
+REBALANCE_THRESHOLD = 0.05
 
 
 @dataclass
@@ -121,8 +121,14 @@ class CryptoTradingEnv(gym.Env):
         else:
             self._init_single_timeframe(feature_columns)
 
-        # Define action space (same for both modes)
-        self.action_space = spaces.Discrete(3)
+        # Define continuous action space: [-1, +1]
+        # Positive = LONG, Negative = SHORT, magnitude = % of capital
+        self.action_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(1,),
+            dtype=np.float32
+        )
 
         # State variables (initialized in reset)
         self._reset_state()
@@ -262,15 +268,16 @@ class CryptoTradingEnv(gym.Env):
         """Get current candle low."""
         return float(self._ohlc[self.current_step, 2])
 
-    def _open_position(self, position_type: Position) -> None:
+    def _open_position(self, position_type: Position, size_pct: float) -> None:
         """
-        Open a new position.
+        Open a new position with specified size.
 
         Args:
             position_type: LONG or SHORT
+            size_pct: Fraction of balance to use (0.0 to 1.0)
         """
         current_price = self._get_current_price()
-        size = self.balance * self.config.position_size_pct
+        size = self.balance * size_pct
 
         # Apply slippage
         if position_type == Position.LONG:
@@ -386,6 +393,61 @@ class CryptoTradingEnv(gym.Env):
             return True, trade.take_profit, "TP"
 
         return False, 0.0, ""
+
+    def _transition_position(self, target: Position, target_size_pct: float) -> None:
+        """
+        Transition from current position to target position.
+
+        Handles:
+        - Opening new positions
+        - Closing positions (target is NONE)
+        - Flipping direction (LONG to SHORT or vice versa)
+        - Rebalancing (same direction, different size)
+
+        Args:
+            target: Target position type (NONE, LONG, SHORT)
+            target_size_pct: Target size as fraction of balance (0.0 to 1.0)
+        """
+        # Case 1: No current position
+        if self.position == Position.NONE:
+            if target != Position.NONE and target_size_pct > 0:
+                self._open_position(target, target_size_pct)
+            return
+
+        # Case 2: Close position (target is NONE or direction change)
+        if target == Position.NONE or target != self.position:
+            # Apply slippage on close
+            current_price = self._get_current_price()
+            if self.current_trade.position_type == Position.LONG:
+                exit_price = current_price * (1 - self.config.slippage_pct)
+            else:
+                exit_price = current_price * (1 + self.config.slippage_pct)
+
+            self._close_position(exit_price, "signal")
+
+            # If new direction, open new position
+            if target != Position.NONE and target_size_pct > 0:
+                self._open_position(target, target_size_pct)
+            return
+
+        # Case 3: Same direction, check if rebalance needed
+        if target == self.position and self.current_trade is not None:
+            # Calculate current position size as % of total equity
+            total_equity = self.balance + self.current_trade.size
+            if total_equity > 0:
+                current_size_pct = self.current_trade.size / total_equity
+                size_diff = abs(target_size_pct - current_size_pct)
+
+                # Only rebalance if change is significant
+                if size_diff > REBALANCE_THRESHOLD:
+                    current_price = self._get_current_price()
+                    if self.current_trade.position_type == Position.LONG:
+                        exit_price = current_price * (1 - self.config.slippage_pct)
+                    else:
+                        exit_price = current_price * (1 + self.config.slippage_pct)
+
+                    self._close_position(exit_price, "rebalance")
+                    self._open_position(target, target_size_pct)
 
     def _calculate_net_worth(self) -> float:
         """
